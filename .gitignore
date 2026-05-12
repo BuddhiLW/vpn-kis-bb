@@ -1,0 +1,9 @@
+.cpcache/
+.clj-kondo/
+.lsp/
+.nrepl-port
+target/
+*.log
+/etc/
+local.deps.edn
+local.config.edn

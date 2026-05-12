@@ -1,0 +1,20 @@
+{:paths ["src" "resources"]
+ :deps
+ {org.babashka/cli {:mvn/version "0.8.67"}
+  babashka/fs      {:mvn/version "0.5.32"}
+  cheshire/cheshire {:mvn/version "6.2.0"}
+  com.taoensso/timbre {:mvn/version "6.8.0"}
+
+  io.github.hive-agi/hive-dsl    {:git/tag "v0.5.1" :git/sha "335869e"}
+  io.github.hive-agi/hive-system {:git/tag "v0.2.4" :git/sha "0706c57"}
+  io.github.hive-agi/hive-weave  {:git/tag "v0.2.5" :git/sha "5895a2a"}}
+
+ :tasks
+ {hello       {:doc "Smoke test" :task (println :vpn-kis-bb/ok)}
+
+  test        {:doc "Run all tests (bb-native)"
+               :extra-paths ["test"]
+               :task (exec 'test-runner/-main)}
+
+  cli         {:doc "Run the CLI"
+               :task (exec 'vpn-kis-bb.cli.main/-main)}}}
