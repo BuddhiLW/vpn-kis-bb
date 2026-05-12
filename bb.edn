@@ -17,4 +17,6 @@
                :task (exec 'test-runner/-main)}
 
   cli         {:doc "Run the CLI"
-               :task (exec 'vpn-kis-bb.cli.main/-main)}}}
+               :task (do (require '[vpn-kis-bb.cli.main])
+                         (apply (resolve 'vpn-kis-bb.cli.main/-main)
+                                *command-line-args*))}}}
