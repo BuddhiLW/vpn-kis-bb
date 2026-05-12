@@ -5,9 +5,12 @@
             [hive-dsl.result :as r]
             [vpn-kis-bb.app.detect :as detect]
             [vpn-kis-bb.app.fetch :as fetch]
+            [vpn-kis-bb.app.panic :as panic]
             [vpn-kis-bb.app.providers :as providers]
             [vpn-kis-bb.app.setup :as setup]
             [vpn-kis-bb.app.split :as split-app]
+            [vpn-kis-bb.app.unlock :as unlock]
+            [vpn-kis-bb.app.verify :as verify]
             [vpn-kis-bb.cli.system :as sys-root]
             [vpn-kis-bb.domain.config :as config]
             [vpn-kis-bb.domain.split :as split-d]))
@@ -41,6 +44,9 @@ Usage:
   vpn-kis-bb auto
   vpn-kis-bb detect
   vpn-kis-bb split add|rm|list|status|connect <name>
+  vpn-kis-bb test
+  vpn-kis-bb unlock
+  vpn-kis-bb panic
   vpn-kis-bb help
 
 Global flags (before any subcommand):
@@ -104,6 +110,26 @@ Providers: mullvad, airvpn, tailscale, plus any /etc/vpn-killswitch/providers/*.
                         (str/join " " (sort (:ok r)))))
           (System/exit 0)))))
 
+(defn- cmd-unlock [opts _]
+  (let [sys (build-system opts)
+        r (unlock/unlock! sys {:dry-run? (:dry-run opts)})]
+    (print-result "unlock" r)))
+
+(defn- cmd-panic [opts _]
+  (let [sys (build-system opts)
+        r (panic/panic! sys {:dry-run? (:dry-run opts)})]
+    (print-result "panic" r)))
+
+(defn- cmd-test [opts _]
+  (let [sys (build-system opts)
+        r (verify/verify sys)
+        report (:ok r)]
+    (println (str "Checks: " (count (:checks report))
+                  "  Failed: " (count (:failed report))))
+    (doseq [c (:checks report)]
+      (println (str "  " (if (:pass? c) "[PASS]" "[fail]") " " (:name c))))
+    (System/exit (if (:ok? report) 0 1))))
+
 (defn- cmd-split [opts args]
   (let [sub  (first args)
         name (second args)
@@ -148,7 +174,12 @@ Providers: mullvad, airvpn, tailscale, plus any /etc/vpn-killswitch/providers/*.
    "providers" cmd-providers
    "auto"      cmd-auto
    "detect"    cmd-detect
-   "split"     cmd-split})
+   "split"     cmd-split
+   "test"      cmd-test
+   "unlock"    cmd-unlock
+   "panic"     cmd-panic
+   "rescue"    cmd-panic
+   "emergency" cmd-panic})
 
 (defn parse-args
   "Pure: split argv into {:global-opts ... :cmd ... :cmd-args [...]}."
