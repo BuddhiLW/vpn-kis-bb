@@ -56,6 +56,36 @@ app/         workflow composition — subcommand handlers
 cli/         babashka/cli entry + system wiring (composition root)
 ```
 
+## Testing
+
+```bash
+bb test
+```
+
+Runs three layers of tests bb-side, no root needed:
+
+1. **Domain tests** — pure rule generators, priority calc, config readers, IPv4 utils.
+2. **Adapter tests** — every shell-backed adapter (ipset, iproute, systemd, ufw, dnsmasq, NM dispatcher, http, dns) goes through a `RecordingShell` that asserts the exact command sequence emitted. Zero live shell + zero network.
+3. **Integration tests** under `test/integration/`:
+   - **Trace tests** — drive `app.{setup,split,…}` through `cli/system :dry-run` mode and assert key command sequences appear in the recorded trace.
+   - **Golden parity** — bb's generated `before.rules`, dnsmasq drop-ins, openvpn up/down scripts, and systemd unit bodies must match byte-for-byte against snapshotted reference files under `test/integration/golden/`.
+
+### Live parity vs upstream bash
+
+Trace tests catch regressions in *our* implementation; they don't prove parity with the bash original. For live parity:
+
+```bash
+sudo VPN_KIS_PARITY_I_AM_IN_A_VM=1 \
+    ./bin/parity-vm.sh capture strict-mullvad
+sudo ./bin/parity-vm.sh diff strict-mullvad
+```
+
+`parity-vm.sh` snapshots `iptables-save`, `ipset save`, `ip rule`, `ufw status`, `before.rules`, and the installed systemd units before/after running each implementation against the same scenario, then unified-diffs the captures.
+
+**Run only inside a throwaway VM** (Multipass / LXD with nesting). The `VPN_KIS_PARITY_I_AM_IN_A_VM=1` guard exists because the harness rewires the host firewall — and `panic` is the only way back out.
+
+Scenarios: `permissive`, `strict-mullvad`, `strict-multi`, `split-example`.
+
 ## License
 
 MIT — same as upstream vpn-kis.

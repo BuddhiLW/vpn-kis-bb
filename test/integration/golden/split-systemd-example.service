@@ -1,0 +1,22 @@
+[Unit]
+Description=VPN Kill-Switch — split 'example' (mark 0x42 -> table 142)
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ipset create vpnkis_split_example_dst hash:ip family inet hashsize 1024 maxelem 65536 timeout 3600 -exist
+ExecStart=-/sbin/iptables -t mangle -N VPNKIS-SPLIT
+ExecStart=/bin/sh -c '/sbin/iptables -t mangle -C OUTPUT -j VPNKIS-SPLIT 2>/dev/null || /sbin/iptables -t mangle -A OUTPUT -j VPNKIS-SPLIT'
+ExecStart=/bin/sh -c '/sbin/iptables -t mangle -C PREROUTING -j VPNKIS-SPLIT 2>/dev/null || /sbin/iptables -t mangle -A PREROUTING -j VPNKIS-SPLIT'
+ExecStart=/bin/sh -c 'while /sbin/iptables -t mangle -D VPNKIS-SPLIT -m set --match-set vpnkis_split_example_dst dst -j MARK --set-mark 0x42 2>/dev/null; do :; done'
+ExecStart=/sbin/iptables -t mangle -A VPNKIS-SPLIT -m set --match-set vpnkis_split_example_dst dst -j MARK --set-mark 0x42
+ExecStart=/bin/sh -c 'while /sbin/ip rule del priority 5089 2>/dev/null; do :; done'
+ExecStart=/sbin/ip rule add fwmark 0x42 lookup 142 priority 5089
+ExecStop=/bin/sh -c 'while /sbin/ip rule del priority 5089 2>/dev/null; do :; done'
+ExecStop=-/sbin/iptables -t mangle -D VPNKIS-SPLIT -m set --match-set vpnkis_split_example_dst dst -j MARK --set-mark 0x42
+ExecStop=-/sbin/ip route flush table 142
+
+[Install]
+WantedBy=multi-user.target
