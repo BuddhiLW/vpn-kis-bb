@@ -30,12 +30,20 @@
            (cmds s)))))
 
 (deftest rule-del-is-idempotent
-  ;; Non-zero exit is NOT treated as error — `ip rule del` when no rule exists.
+  ;; A non-zero exit (`ip rule del` with no rule left) is not an error.
   (let [s (rec/make {:responses {"ip" {:exit 2 :stderr "RTNETLINK answers: No such file"}}})
         i (ipr/make s)
         r (port/-rule-del! i 5089)]
     (is (:ok r))
     (is (= [["ip" "rule" "del" "priority" "5089"]] (cmds s)))))
+
+(deftest rule-del-reports-exit-for-draining
+  ;; Callers repeat `ip rule del priority P` until it fails (bash
+  ;; `while ip rule del ...; do :; done`), so both outcomes carry :exit.
+  (let [ok  (port/-rule-del! (ipr/make (rec/make)) 5089)
+        bad (port/-rule-del! (ipr/make (rec/make {:responses {"ip" {:exit 2}}})) 5089)]
+    (is (= 0 (-> ok :ok :exit)))
+    (is (= 2 (-> bad :ok :exit)))))
 
 (deftest route-replace-default
   (let [s (rec/make)

@@ -10,19 +10,20 @@
    the first element of a vector). Values are the maps returned. Anything
    not in the map gets a default 0-exit ok response."
   (:require [hive-dsl.result :as r]
-            [hive-system.protocols :as proto]))
+            [hive-system.protocols :as proto]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (defn- key-of-cmd [cmd]
   (if (vector? cmd)
     (first cmd)
-    (-> (str cmd) (clojure.string/split #"\s+") first)))
+    (-> (str cmd) (rx/split* #"\s+") first)))
 
-(defrecord RecordingShell [calls responses]
+(defrecord RecordingShell [calls responses respond]
   proto/IShell
   (shell-exec! [_ cmd opts]
     (swap! calls conj {:cmd cmd :opts opts})
-    (let [k (key-of-cmd cmd)
-          override (get responses k)]
+    (let [override (or (when respond (respond cmd opts))
+                       (get responses (key-of-cmd cmd)))]
       (r/ok (merge {:exit 0 :stdout "" :stderr "" :duration-ms 0 :cmd cmd}
                    (or override {})))))
   (shell-env [_] (into {} (System/getenv)))
@@ -32,15 +33,25 @@
 (defn make
   "Construct a RecordingShell.
 
-   opts: {:responses {<cmd-key-str> {:exit N :stdout S :stderr S}}}
-   The :calls atom is exposed on the returned record so tests can read it."
+   opts: {:responses {<cmd-key-str> {:exit N :stdout S :stderr S}}
+          :respond   (fn [cmd opts] -> {:exit N :stdout S ...} | nil)}
+   :respond answers per full command (e.g. `ip rule show` vs
+   `ip route show table 52`) and wins over :responses, which is keyed by
+   the first arg only. The :calls atom is exposed on the returned record
+   so tests can read it."
   ([]              (make {}))
-  ([{:keys [responses]}] (->RecordingShell (atom []) (or responses {}))))
+  ([{:keys [responses respond]}]
+   (->RecordingShell (atom []) (or responses {}) respond)))
 
 (defn calls
   "Read recorded invocations from a RecordingShell."
   [shell]
   @(:calls shell))
+
+(defn cmds
+  "Just the recorded commands, in order."
+  [shell]
+  (mapv :cmd (calls shell)))
 
 (defn reset! [shell]
   (clojure.core/reset! (:calls shell) []))

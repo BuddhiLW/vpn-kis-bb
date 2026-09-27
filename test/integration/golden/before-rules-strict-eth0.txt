@@ -17,18 +17,8 @@
 # --- NTP ---
 -A ufw-before-output -o eth0 -p udp --dport 123 -j ACCEPT
 
-# --- VPN tunnel ports (locked to ipset vpn_endpoints) ---
--A ufw-before-output -o eth0 -p udp --dport 1194 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 443 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 53 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 51820 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 1300 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 1301 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 1302 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 1637 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 41641 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p udp --dport 3478 -m set --match-set vpn_endpoints dst -j ACCEPT
--A ufw-before-output -o eth0 -p tcp --dport 443 -m set --match-set vpn_endpoints dst -j ACCEPT
+# --- VPN endpoints, any port (ipset vpn_endpoints: 2 IPs; STRICT_PORTS=1 for the old port lock) ---
+-A ufw-before-output -o eth0 -m set --match-set vpn_endpoints dst -j ACCEPT
 
 # --- VPN interfaces: allow all ---
 -A ufw-before-output -o tun+ -j ACCEPT

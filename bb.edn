@@ -1,7 +1,6 @@
 {:paths ["src" "resources"]
  :deps
- {org.babashka/cli {:mvn/version "0.8.67"}
-  babashka/fs      {:mvn/version "0.5.32"}
+ {babashka/fs      {:mvn/version "0.5.32"}
   cheshire/cheshire {:mvn/version "6.2.0"}
   com.taoensso/timbre {:mvn/version "6.8.0"}
 
@@ -19,4 +18,7 @@
   cli         {:doc "Run the CLI"
                :task (do (require '[vpn-kis-bb.cli.main])
                          (apply (resolve 'vpn-kis-bb.cli.main/-main)
-                                *command-line-args*))}}}
+                                *command-line-args*))}
+  tns {:doc "Run the test namespaces whose name contains any given substring: bb tns exclude refresh"
+       :extra-paths ["test"]
+       :task (apply (requiring-resolve 'cljw-runner/-main) *command-line-args*)}}}

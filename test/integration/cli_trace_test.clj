@@ -39,14 +39,16 @@
 (deftest dry-run-setup-strict
   (let [{:keys [system]} (sys/dry-run-system)
         r (setup/setup! system {:mode :strict
+                                :endpoints ["1.2.3.4"]
                                 :physical-iface "eth0"
-                                :ipset-name "vpn_endpoints"
                                 :dry-run? true})]
     (is (r/ok? r))
-    (testing "strict-mode before.rules locks pre-tunnel to ipset"
+    (testing "strict-mode before.rules locks pre-tunnel to the ipset, any port"
       (let [txt (-> r :ok :before-rules)]
-        (is (str/includes? txt "match-set vpn_endpoints dst"))
-        (is (not (str/includes? txt "-p udp --dport 53 -j ACCEPT")))))))
+        (is (str/includes? txt "-A ufw-before-output -o eth0 -m set --match-set vpn_endpoints dst -j ACCEPT"))
+        (is (not (str/includes? txt "-p udp --dport 53 -j ACCEPT")))))
+    (testing "strict mode refuses an empty endpoint set"
+      (is (r/err? (setup/setup! system {:mode :strict :physical-iface "eth0" :dry-run? true}))))))
 
 ;; ---------------------------------------------------------------- split
 

@@ -13,15 +13,16 @@
             [hive-dsl.result :as r]
             [vpn-kis-bb.domain.util :as u]
             [vpn-kis-bb.ports.fetcher :as port]
-            [vpn-kis-bb.ports.dns :as dns]))
+            [vpn-kis-bb.ports.dns :as dns]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (defn parse-remote-lines
   "Returns a vector of hostnames from `remote <host> [port]` lines.
    Pure: takes the file's content as a string."
   [content]
-  (->> (str/split-lines (or content ""))
+  (->> (rx/split-lines* (or content ""))
        (keep (fn [line]
-               (when-let [m (re-find #"^\s*remote\s+(\S+)" line)]
+               (when-let [m (rx/re-find* #"^\s*remote\s+(\S+)" line)]
                  (second m))))
        distinct
        vec))
@@ -52,7 +53,7 @@
                :ips        (u/normalize-ips resolved)
                :source     (str ovpn-path)
                :hosts      hosts
-               :fetched-at (java.time.Instant/now)})))))
+               :fetched-at (u/now-iso)})))))
 
 (defn make
   [provider-name ovpn-path resolver]

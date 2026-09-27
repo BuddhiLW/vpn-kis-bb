@@ -7,3 +7,4 @@ target/
 /etc/
 local.deps.edn
 local.config.edn
+build/

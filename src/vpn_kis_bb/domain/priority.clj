@@ -1,59 +1,71 @@
 (ns vpn-kis-bb.domain.priority
-  "Pure: detect the right `ip rule` priority to slot below Mullvad's
-   fwmark default route.
+  "Pure: the `ip rule` priority of a split tunnel's fwmark rule when its
+   conf says PRIORITY=auto (bash: detect_tailscale_rule_prio plus the
+   PRIORITY=auto branch of split_load_conf). Only split tunnels still take
+   a priority slot; the tailnet bypasses Mullvad by its marks
+   (vpn-kis-bb.domain.tailscale).
 
-   Bash equivalent: `detect_tailscale_rule_prio` (vpn-firewall-setup.sh).
+   `ip rule show` is parsed with index-of and a character set, no regex
+   (ClojureWasm 1.14.11 corrupts some regex results)."
+  (:require [clojure.string :as str]
+            [vpn-kis-bb.domain.re :as rx]))
 
-   Mullvad app builds have used different priorities over time (5199 today,
-   5209 historically). We parse the live `ip rule show` and place ours one
-   below. If Mullvad isn't present, fall back to a literal."
-  (:require [clojure.string :as str]))
+(def mullvad-fwmark
+  "Mark Mullvad's catch-all ip rule skips (\"mole\" in ASCII)."
+  "0x6d6f6c65")
 
-(def mullvad-fwmark "0x6d6f6c65")  ; "mole" in ASCII
+(def fallback-priority
+  "bash TAILSCALE_RULE_PRIO_FALLBACK: the base priority when Mullvad's
+   fwmark rule is absent."
+  5100)
 
-(def fallback-priority 5100)
+(def split-fallback-priority
+  "bash SPLIT_RULE_PRIO_FALLBACK: the split priority when the base is 11
+   or less."
+  5090)
+
+(def ^:private digit-chars (set "0123456789"))
 
 (defn parse-ip-rule-line
-  "Parse a single line from `ip rule show`, e.g.
-     32766:  from all lookup main
-     5199:   not from all fwmark 0x6d6f6c65 lookup 5099
-   Returns {:priority N :raw <line>} or nil if unparseable."
+  "One line of `ip rule show`, e.g.
+     5199:  not from all fwmark 0x6d6f6c65 lookup 1836018789
+   as {:priority 5199 :raw \"not from all fwmark ...\"}. nil when the text
+   before the first colon is not a decimal priority or nothing follows it."
   [line]
-  (when-let [m (re-find #"^(\d+):\s+(.+)$" (or line ""))]
-    {:priority (Long/parseLong (second m))
-     :raw      (nth m 2)}))
+  (let [line (or line "")
+        i    (str/index-of line ":")]
+    (when (and i (pos? i))
+      (let [digits (subs line 0 i)
+            raw    (str/trim (subs line (inc i)))
+            prio   (when (every? #(contains? digit-chars %) digits) (parse-long digits))]
+        (when (and prio (seq raw))
+          {:priority prio :raw raw})))))
 
 (defn parse-ip-rule-output
-  "Parse the full output of `ip rule show` into a vector of rule maps."
+  "`ip rule show` output as a vector of parse-ip-rule-line maps, in order."
   [s]
-  (->> (str/split-lines (or s ""))
+  (->> (rx/split-lines* (or s ""))
        (keep parse-ip-rule-line)
        vec))
 
 (defn mullvad-priority
-  "Find the priority of Mullvad's fwmark rule, or nil if not present."
+  "Priority of the first rule mentioning Mullvad's fwmark, or nil."
   [rules]
   (some (fn [{:keys [priority raw]}]
-          (when (str/includes? raw (str "fwmark " mullvad-fwmark))
+          (when (str/includes? (str raw) (str "fwmark " mullvad-fwmark))
             priority))
         rules))
 
 (defn choose-priority
-  "Given parsed `ip rule show` data, return the priority at which auxiliary
-   rules (Tailscale subnet routes, split-tunnel marks) should slot.
-
-   Strategy: Mullvad's priority minus 1 (slot just above). If Mullvad
-   isn't there, fall back to `fallback-priority`.
-
-   Pure: no I/O."
+  "bash detect_tailscale_rule_prio: one below Mullvad's fwmark rule when
+   that sits above priority 1, else fallback-priority."
   [rules]
-  (if-let [mp (mullvad-priority rules)]
-    (if (> mp 1) (dec mp) fallback-priority)
-    fallback-priority))
+  (let [mp (mullvad-priority rules)]
+    (if (and mp (> mp 1)) (dec mp) fallback-priority)))
 
 (defn choose-split-priority
-  "Like `choose-priority` but ~10 lower so split-tunnel marks beat Tailscale
-   subnet routes (which themselves beat Mullvad's default)."
+  "PRIORITY=auto (bash split_load_conf): ten below choose-priority when
+   that is above 11, else split-fallback-priority."
   [rules]
   (let [base (choose-priority rules)]
-    (max 1 (- base 10))))
+    (if (> base 11) (- base 10) split-fallback-priority)))

@@ -1,9 +1,9 @@
 (ns vpn-kis-bb.ports.systemd
-  "ISystemdUnit — write + enable + disable boot-persistence units.
+  "ISystemdUnit: write, enable, start, disable boot-persistence units.
 
-   The bash version writes Tailscale + split-tunnel oneshots into
-   /etc/systemd/system/. Same shape here, but the unit body comes from a
-   pure generator (`domain.rules/systemd-unit-text`).")
+   The bash version writes the tailscale-routes, refresh, exclude and
+   split-tunnel units into /etc/systemd/system/. Same shape here; unit
+   bodies come from pure generators in the domain namespaces.")
 
 (defprotocol ISystemdUnit
   (-write! [this unit-name body]
@@ -12,6 +12,8 @@
     "Delete the unit file. Returns Result.")
   (-enable! [this unit-name]
     "systemctl enable. Returns Result.")
+  (-start! [this unit-name]
+    "systemctl start. Returns Result; err on a non-zero exit.")
   (-disable! [this unit-name]
     "systemctl disable --now. Returns Result.")
   (-daemon-reload! [this]

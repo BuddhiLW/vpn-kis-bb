@@ -10,11 +10,12 @@
             [clojure.string :as str]
             [hive-dsl.result :as r]
             [vpn-kis-bb.app.fetch :as fetch]
-            [vpn-kis-bb.domain.util :as u]))
+            [vpn-kis-bb.domain.util :as u]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (defn- read-ips-file [path]
   (when (fs/exists? path)
-    (->> (str/split-lines (slurp (fs/file path)))
+    (->> (rx/split-lines* (slurp (fs/file path)))
          u/normalize-ips)))
 
 (defn load-union

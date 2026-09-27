@@ -1,0 +1,18 @@
+#!/bin/sh
+# Build the native vpn-kis binary with ClojureWasm: build/vpn-kis.
+# bin/vpn-kis uses it only with VPN_KIS_NATIVE=1: cljw 1.14.11 `build`
+# miscompiles parts of setup and refresh (an ArityException with a garbage
+# arity, a SIGABRT) that the cljw interpreter runs correctly.
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "$0")")/.." && pwd)
+mkdir -p "$root/build"
+
+# From /: cljw reads a deps.edn in the working directory, and the Maven/git
+# deps there are the Babashka ones, not the cljw/ compat layer.
+cd /
+cljw build -m vpn-kis-bb.cli.main \
+    -cp "$root/cljw:$root/src" \
+    -o "$root/build/vpn-kis"
+
+echo "built $root/build/vpn-kis"

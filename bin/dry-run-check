@@ -1,0 +1,45 @@
+#!/bin/sh
+# Exercise every command family of bin/vpn-kis without changing the host:
+# read-only commands as they are, the rest with --dry-run (commands are
+# recorded, file writes printed). Needs no root. Run it before switching a
+# machine over to vpn-kis-bb; it exits 1 when any exit code is unexpected.
+# The providers and refresh checks need cached lists: run
+# `sudo bin/vpn-kis fetch mullvad tailscale` once on a fresh machine.
+set -u
+
+root=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "$0")")/.." && pwd)
+launcher="$root/bin/vpn-kis"
+out=$(mktemp "${TMPDIR:-/tmp}/vpn-kis-check.XXXXXX") || exit 1
+trap 'rm -f "$out"' EXIT
+bad=0
+
+check() {
+    want=$1
+    shift
+    "$launcher" "$@" > "$out" 2>&1
+    rc=$?
+    if [ "$rc" = "$want" ]; then
+        printf 'ok    %-50s exit %s\n' "$*" "$rc"
+    else
+        printf 'FAIL  %-50s exit %s, expected %s\n' "$*" "$rc" "$want"
+        tail -5 "$out" | sed 's/^/      | /'
+        bad=1
+    fi
+}
+
+check 0 help
+check 1 no-such-command
+check 1 providers --lan
+check 0 exclude status
+check 0 split list
+check 0 --dry-run setup
+check 0 --dry-run providers mullvad tailscale
+check 0 --dry-run --lan 192.168.100.0/24 providers mullvad tailscale
+check 0 --dry-run refresh
+check 0 --dry-run panic
+check 0 --dry-run unlock
+check 0 --dry-run tailscale-routes apply
+check 0 --dry-run nm-dispatch tailscale0 up
+check 1 --dry-run tailscale-routes sideways
+
+exit "$bad"

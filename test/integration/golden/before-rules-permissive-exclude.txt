@@ -1,0 +1,68 @@
+*filter
+:ufw-before-input - [0:0]
+:ufw-before-output - [0:0]
+:ufw-before-forward - [0:0]
+
+# --- Loopback ---
+-A ufw-before-input -i lo -j ACCEPT
+-A ufw-before-output -o lo -j ACCEPT
+
+# --- Established/related ---
+-A ufw-before-input -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A ufw-before-output -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# --- DHCP ---
+-A ufw-before-output -o wlan0 -p udp --dport 67 -j ACCEPT
+
+# --- NTP ---
+-A ufw-before-output -o wlan0 -p udp --dport 123 -j ACCEPT
+
+# --- DNS on physical IF (resolve VPN hosts) ---
+-A ufw-before-output -o wlan0 -p udp --dport 53 -j ACCEPT
+-A ufw-before-output -o wlan0 -p tcp --dport 53 -j ACCEPT
+
+# --- Eddie HTTPS auth ---
+-A ufw-before-output -o wlan0 -p tcp --dport 443 -j ACCEPT
+
+# --- VPN tunnel ports (any host) ---
+-A ufw-before-output -o wlan0 -p udp --dport 1194 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 443 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 53 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 51820 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 1300 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 1301 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 1302 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 1637 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 41641 -j ACCEPT
+-A ufw-before-output -o wlan0 -p udp --dport 3478 -j ACCEPT
+-A ufw-before-output -o wlan0 -p tcp --dport 443 -j ACCEPT
+
+# --- VPN interfaces: allow all ---
+-A ufw-before-output -o tun+ -j ACCEPT
+-A ufw-before-input  -i tun+ -j ACCEPT
+-A ufw-before-output -o wg+ -j ACCEPT
+-A ufw-before-input  -i wg+ -j ACCEPT
+-A ufw-before-output -o Eddie -j ACCEPT
+-A ufw-before-input  -i Eddie -j ACCEPT
+-A ufw-before-output -o ppp+ -j ACCEPT
+-A ufw-before-input  -i ppp+ -j ACCEPT
+-A ufw-before-output -o tailscale0 -j ACCEPT
+-A ufw-before-input  -i tailscale0 -j ACCEPT
+
+# --- VPN interfaces: allow forwarded traffic (containers, VMs) ---
+-A ufw-before-forward -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A ufw-before-forward -o tun+ -j ACCEPT
+-A ufw-before-forward -o wg+ -j ACCEPT
+-A ufw-before-forward -o Eddie -j ACCEPT
+-A ufw-before-forward -o ppp+ -j ACCEPT
+-A ufw-before-forward -o tailscale0 -j ACCEPT
+
+# --- BEGIN vpn-kis exclude (mark 0x51 via cgroup vpnkis-exclude) ---
+-A ufw-before-output -o wlan0 -m mark --mark 0x51 -j ACCEPT
+# --- END vpn-kis exclude ---
+
+# --- KILL-SWITCH: drop anything else on physical IF ---
+-A ufw-before-output -o wlan0 -j DROP
+-A ufw-before-input  -i wlan0 -j DROP
+
+COMMIT

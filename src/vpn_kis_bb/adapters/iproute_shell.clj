@@ -1,10 +1,9 @@
 (ns vpn-kis-bb.adapters.iproute-shell
-  "ShellIpRoute — IIpRoute impl via `ip rule` / `ip route` CLI.
+  "ShellIpRoute: IIpRoute over the `ip rule` / `ip route` CLI.
 
    The parser for `ip rule show` lives in domain.priority; this adapter
-   just wires the shell capture into that pure function."
-  (:require [clojure.string :as str]
-            [hive-dsl.result :as r]
+   wires the shell capture into that pure function."
+  (:require [hive-dsl.result :as r]
             [hive-system.protocols :as proto]
             [vpn-kis-bb.domain.priority :as priority]
             [vpn-kis-bb.ports.iproute :as port]))
@@ -25,13 +24,13 @@
 
 (defrecord ShellIpRoute [shell]
   port/IIpRoute
-  (-rule-show [_]
+  (-rule-show [_this]
     (let [resp (run shell ["ip" "rule" "show"])]
       (if (r/err? resp)
         resp
         (r/ok (priority/parse-ip-rule-output (-> resp :ok :stdout))))))
 
-  (-rule-add! [_ {:keys [fwmark to lookup priority]}]
+  (-rule-add! [_this {:keys [fwmark to lookup priority]}]
     (let [args (cond-> ["ip" "rule" "add"]
                  fwmark   (into ["fwmark" (str fwmark)])
                  to       (into ["to" (str to)])
@@ -39,17 +38,17 @@
                  priority (into ["priority" (str priority)]))]
       (run shell args)))
 
-  (-rule-del! [_ priority]
-    ;; idempotent — best-effort drop
+  (-rule-del! [_this priority]
+    ;; one rule per call; ok either way with the :exit, so callers can drain
     (run-soft shell ["ip" "rule" "del" "priority" (str priority)]))
 
-  (-route-add! [_ {:keys [dst dev table]}]
+  (-route-add! [_this {:keys [dst dev table]}]
     (run shell ["ip" "route" "add" (str dst) "dev" (str dev) "table" (str table)]))
 
-  (-route-replace-default! [_ {:keys [dev table]}]
+  (-route-replace-default! [_this {:keys [dev table]}]
     (run shell ["ip" "route" "replace" "default" "dev" (str dev) "table" (str table)]))
 
-  (-table-flush! [_ table]
+  (-table-flush! [_this table]
     (run-soft shell ["ip" "route" "flush" "table" (str table)])))
 
 (defn make

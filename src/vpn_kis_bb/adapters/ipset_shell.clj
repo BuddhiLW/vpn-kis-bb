@@ -7,7 +7,8 @@
   (:require [clojure.string :as str]
             [hive-dsl.result :as r]
             [hive-system.protocols :as proto]
-            [vpn-kis-bb.ports.ipset :as port]))
+            [vpn-kis-bb.ports.ipset :as port]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (defn- run [shell cmd]
   (let [resp (proto/shell-exec! shell cmd {})]
@@ -53,7 +54,7 @@
       (if (r/err? resp)
         resp
         (let [out (-> resp :ok :stdout)
-              ips (->> (str/split-lines out)
+              ips (->> (rx/split-lines* out)
                        (drop-while #(not (str/starts-with? % "Members:")))
                        (drop 1)
                        (map str/trim)

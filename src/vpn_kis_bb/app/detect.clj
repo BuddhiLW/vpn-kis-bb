@@ -11,15 +11,16 @@
   (:require [clojure.string :as str]
             [hive-dsl.result :as r]
             [hive-system.protocols :as proto]
-            [vpn-kis-bb.domain.util :as u]))
+            [vpn-kis-bb.domain.util :as u]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (defn parse-wg-endpoints
   "Pure: pull peer IPs out of `wg show all endpoints` lines like
      interface PUBKEY 1.2.3.4:51820"
   [s]
-  (->> (str/split-lines (or s ""))
+  (->> (rx/split-lines* (or s ""))
        (keep (fn [line]
-               (when-let [m (re-find #"(\d+\.\d+\.\d+\.\d+):\d+" line)]
+               (when-let [m (rx/re-find* #"(\d+\.\d+\.\d+\.\d+):\d+" line)]
                  (second m))))
        u/normalize-ips))
 
@@ -27,10 +28,10 @@
   "Pure: pull remote peer IPv4s from `ss -tunp` rows whose users tuple
    mentions 'openvpn'. Excludes loopback + 0.0.0.0."
   [s]
-  (->> (str/split-lines (or s ""))
+  (->> (rx/split-lines* (or s ""))
        (filter #(str/includes? % "openvpn"))
        (mapcat (fn [line]
-                 (re-seq #"\d+\.\d+\.\d+\.\d+" line)))
+                 (rx/re-seq* #"\d+\.\d+\.\d+\.\d+" line)))
        (remove #(or (str/starts-with? % "127.")
                     (= "0.0.0.0" %)))
        u/normalize-ips))
@@ -39,11 +40,11 @@
   "Pure: pull `via <peer>` IPs from `ip route` lines whose dev is a
    tun/wg interface."
   [s]
-  (->> (str/split-lines (or s ""))
+  (->> (rx/split-lines* (or s ""))
        (filter (fn [line]
-                 (re-find #"dev\s+(tun|wg)" line)))
+                 (rx/re-find* #"dev\s+(tun|wg)" line)))
        (keep (fn [line]
-               (when-let [m (re-find #"via\s+(\d+\.\d+\.\d+\.\d+)" line)]
+               (when-let [m (rx/re-find* #"via\s+(\d+\.\d+\.\d+\.\d+)" line)]
                  (second m))))
        u/normalize-ips))
 

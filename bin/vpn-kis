@@ -1,0 +1,59 @@
+#!/bin/sh
+# vpn-kis launcher.
+#
+# Runs the Clojure kill-switch with the first runtime available:
+#   $VPN_KIS_BIN, then build/vpn-kis when VPN_KIS_NATIVE=1 (native,
+#   `bin/build-native`), then cljw (interpreted, compat layer mounted; the
+#   default, about 0.1 s to start), then bb (development).
+# Then, if the program asked to hand the terminal to a command (exclude run,
+# split connect), sources the script it wrote to $VPN_KIS_EXEC_FILE; that
+# script execs the command in this very process.
+set -u
+
+self=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+root=$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)
+
+exec_file=$(mktemp "${TMPDIR:-/tmp}/vpn-kis-exec.XXXXXX") || {
+    echo "vpn-kis: cannot create the exec hand-off file" >&2
+    exit 1
+}
+
+export VPN_KIS_SELF="${VPN_KIS_SELF:-$self}"
+export VPN_KIS_PROG="${VPN_KIS_PROG:-$(basename -- "$0")}"
+export VPN_KIS_EXEC_FILE="$exec_file"
+
+# sudo's secure_path and NetworkManager hooks run with a minimal PATH, so
+# the interpreters are also looked up where they are commonly installed.
+extra_path="/usr/local/bin:/home/linuxbrew/.linuxbrew/bin"
+if [ -n "${SUDO_USER:-}" ]; then
+    sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    [ -n "$sudo_home" ] && extra_path="$extra_path:$sudo_home/.local/bin"
+fi
+find_tool() { (PATH="$PATH:$extra_path" && command -v "$1") || true; }
+cljw_bin=$(find_tool cljw)
+bb_bin=$(find_tool bb)
+
+if [ -n "${VPN_KIS_BIN:-}" ] && [ -x "$VPN_KIS_BIN" ]; then
+    "$VPN_KIS_BIN" "$@"
+elif [ "${VPN_KIS_NATIVE:-}" = "1" ] && [ -x "$root/build/vpn-kis" ]; then
+    # Opt-in: cljw 1.14.11 `build` miscompiles parts of setup/refresh.
+    "$root/build/vpn-kis" "$@"
+elif [ -n "$cljw_bin" ]; then
+    # From /: cljw reads a deps.edn in the working directory.
+    (cd / && exec "$cljw_bin" -cp "$root/cljw:$root/src" \
+        -m vpn-kis-bb.cli.main "$@")
+elif [ -n "$bb_bin" ]; then
+    "$bb_bin" --config "$root/bb.edn" -m vpn-kis-bb.cli.main "$@"
+else
+    echo "vpn-kis: no runtime found (build/vpn-kis, cljw or bb)" >&2
+    rm -f "$exec_file"
+    exit 127
+fi
+rc=$?
+
+if [ -s "$exec_file" ]; then
+    # shellcheck source=/dev/null
+    . "$exec_file"
+fi
+rm -f "$exec_file"
+exit "$rc"

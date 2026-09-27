@@ -1,54 +1,167 @@
 (ns vpn-kis-bb.domain.split-test
-  (:require [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [vpn-kis-bb.domain.split :as s]))
 
 (def good-cfg
-  {:name "example"
+  {:name    "example"
    :domains ["*.example.com" "app.example.org"]
-   :dev "tun-example"})
+   :dev     "tun-example"})
 
-(deftest validate-test
-  (testing "happy path"
-    (let [r (s/validate good-cfg)]
-      (is (:ok? r))
-      (is (= ["example.com" "app.example.org"] (:domains (:value r))))
-      (is (= s/default-table (:table (:value r))))
-      (is (= s/default-mark (:mark (:value r))))
-      (is (= :auto (:priority (:value r))))))
-  (testing "missing name"
-    (is (not (:ok? (s/validate (dissoc good-cfg :name))))))
-  (testing "bad name chars"
-    (is (not (:ok? (s/validate (assoc good-cfg :name "bad name"))))))
-  (testing "empty domains"
-    (is (not (:ok? (s/validate (assoc good-cfg :domains [])))))))
+(defn- err [cfg] (:error (s/validate cfg)))
+
+(def example
+  (:value (s/validate {:name     "example"
+                       :domains  ["*.example.com" "other.example.org"]
+                       :dev      "tun-example"
+                       :priority 5089})))
+
+;; ---------------------------------------------------------------- validate
+
+(deftest validate-happy-path
+  (let [r (s/validate good-cfg)
+        v (:value r)]
+    (is (:ok? r))
+    (is (= ["*.example.com" "app.example.org"] (:patterns v)))
+    (is (= ["example.com" "app.example.org"] (:domains v)))
+    (is (= s/default-table (:table v)))
+    (is (= s/default-mark (:mark v)))
+    (is (= :auto (:priority v)))
+    (is (nil? (:ovpn-config v)))
+    (is (= "/etc/vpn-killswitch/split/example.conf" (:source v)))))
+
+(deftest validate-bash-messages
+  (is (= "split: name required" (err (dissoc good-cfg :name))))
+  (is (= "split: name must match [a-zA-Z0-9_-]+" (err (assoc good-cfg :name "bad name"))))
+  (is (= "split: DOMAINS empty in /etc/vpn-killswitch/split/example.conf"
+         (err (assoc good-cfg :domains []))))
+  (is (= "split: DEV empty in /etc/vpn-killswitch/split/example.conf (must match openvpn --dev)"
+         (err (dissoc good-cfg :dev))))
+  (is (= "split: PRIORITY must be 'auto' or integer" (err (assoc good-cfg :priority "abc"))))
+  (is (= "split: PRIORITY must be 'auto' or integer" (err (assoc good-cfg :priority "-5"))))
+  (is (= "split: PRIORITY must be 'auto' or integer" (err (assoc good-cfg :priority -5))))
+  (is (= "split: config is empty or not a map" (err nil)))
+  (testing "source names the file in messages"
+    (is (= "split: DOMAINS empty in /x/example.edn"
+           (:error (s/validate (assoc good-cfg :domains "") "/x/example.edn"))))))
+
+(deftest validate-normalizes
+  (testing "DOMAINS as a whitespace-separated string"
+    (is (= ["a.com" "b.org"]
+           (-> (s/validate (assoc good-cfg :domains " *.a.com\tb.org ")) :value :domains))))
+  (testing "PRIORITY"
+    (is (= :auto (-> (s/validate (assoc good-cfg :priority "auto")) :value :priority)))
+    (is (= :auto (-> (s/validate (assoc good-cfg :priority "")) :value :priority)))
+    (is (= 5089 (-> (s/validate (assoc good-cfg :priority "5089")) :value :priority)))
+    (is (= 5089 (-> (s/validate (assoc good-cfg :priority 5089)) :value :priority))))
+  (testing "TABLE: digits, or an rt_tables name"
+    (is (= 200 (-> (s/validate (assoc good-cfg :table "200")) :value :table)))
+    (is (= "corp" (-> (s/validate (assoc good-cfg :table "corp")) :value :table))))
+  (testing "MARK: hex, decimal, VALUE/MASK"
+    (is (= "0x1" (-> (s/validate (assoc good-cfg :mark "0x1")) :value :mark)))
+    (is (= "66" (-> (s/validate (assoc good-cfg :mark 66)) :value :mark)))
+    (is (= "0x42/0xff" (-> (s/validate (assoc good-cfg :mark "0x42/0xff")) :value :mark))))
+  (testing "a blank OVPN_CONFIG is unset"
+    (is (nil? (-> (s/validate (assoc good-cfg :ovpn-config "  ")) :value :ovpn-config)))))
+
+(deftest validate-rejects-values-that-would-break-an-install
+  (is (str/starts-with? (err (assoc good-cfg :domains ["a.com" "b/c.com"]))
+                        "split: invalid domain 'b/c.com'"))
+  (is (str/starts-with? (err (assoc good-cfg :domains ["*"])) "split: invalid domain '*'"))
+  (is (str/starts-with? (err (assoc good-cfg :dev "tun x\"")) "split: DEV 'tun x\"'"))
+  (is (str/starts-with? (err (assoc good-cfg :table "1;rm")) "split: TABLE must be"))
+  (doseq [t ["254" "main" "0" "local" 255]]
+    (is (str/starts-with? (err (assoc good-cfg :table t))
+                          (str "split: TABLE " t " is a kernel table"))
+        (str t)))
+  (doseq [m ["0x" "0xZZ" "abc" "0x42/" "/1" "0x1/0x2/0x3"]]
+    (is (str/starts-with? (str (err (assoc good-cfg :mark m))) "split: MARK must be") m)))
+
+;; ---------------------------------------------------------------- generated files
 
 (deftest dnsmasq-drop-in-test
-  (let [v (:value (s/validate good-cfg))
-        out (s/dnsmasq-drop-in-text v)]
-    (is (str/includes? out "ipset=/example.com/vpnkis_split_example_dst"))
-    (is (str/includes? out "ipset=/app.example.org/vpnkis_split_example_dst"))
-    (is (str/includes? out "# Generated by vpn-kis-bb split add example"))))
+  (is (= (str "# Generated by vpn-kis split add example\n"
+              "# Domains routed via auxiliary tunnel tun-example\n"
+              "ipset=/example.com/vpnkis_split_example_dst\n"
+              "ipset=/other.example.org/vpnkis_split_example_dst\n")
+         (s/dnsmasq-drop-in-text example))))
 
 (deftest up-down-scripts-test
-  (let [v (:value (s/validate good-cfg))
-        up (s/openvpn-up-script-text v)
-        down (s/openvpn-down-script-text v)]
-    (is (str/starts-with? up "#!/bin/sh"))
-    (is (str/includes? up "ip route replace default dev"))
-    (is (str/includes? up "table 142"))
-    (is (str/includes? down "ip route flush table 142"))))
+  (let [up   (s/openvpn-up-script-text example)
+        down (s/openvpn-down-script-text example)]
+    (is (str/starts-with? up "#!/bin/sh\n"))
+    (is (str/includes? up "DEV=\"${1:-tun-example}\"\n"))
+    (is (str/includes? up "ip route replace default dev \"$DEV\" table 142\n"))
+    (is (str/includes? down "ip route flush table 142 2>/dev/null || true\n"))))
 
 (deftest systemd-unit-test
-  (let [v (:value (s/validate (assoc good-cfg :priority 5089)))
-        body (s/systemd-unit-text v)]
-    (is (str/includes? body "[Unit]"))
-    (is (str/includes? body "Description=VPN Kill-Switch"))
-    (is (str/includes? body "ExecStart=/sbin/ipset create vpnkis_split_example_dst"))
-    (is (str/includes? body "ExecStart=/sbin/ip rule add fwmark 0x42 lookup 142 priority 5089"))
-    (is (str/includes? body "ExecStop="))))
+  (let [body (s/systemd-unit-text example)]
+    (is (str/includes? body "Description=VPN Kill-Switch: split 'example' (mark 0x42 -> table 142)\n"))
+    (is (str/includes? body (str "ExecStart=/sbin/ipset create vpnkis_split_example_dst hash:ip"
+                                 " family inet hashsize 1024 maxelem 65536 timeout 3600 -exist\n")))
+    (is (str/includes? body "ExecStart=/sbin/ip rule add fwmark 0x42 lookup 142 priority 5089\n"))
+    (is (str/includes? body "ExecStop=-/sbin/ip route flush table 142\n"))
+    (is (every? #(< (int %) 128) body) "ASCII only")))
 
-(deftest path-helpers-test
+(deftest unit-rule-params-test
+  (is (= {:priority "5089" :fwmark "0x42"} (s/unit-rule-params (s/systemd-unit-text example))))
+  (is (= {:priority nil :fwmark nil} (s/unit-rule-params nil)))
+  (is (= {:priority nil :fwmark nil} (s/unit-rule-params "ExecStart=/sbin/ip rule add fwmark\n"))))
+
+;; ---------------------------------------------------------------- names, commands, reports
+
+(deftest words-test
+  (is (= ["a" "b" "c"] (s/words "  a\tb\n c ")))
+  (is (= [] (s/words "")))
+  (is (= [] (s/words nil))))
+
+(deftest names-and-paths-test
   (is (= "vpnkis_split_foo_dst" (s/ipset-name "foo")))
   (is (= "vpn-killswitch-split-foo.service" (s/unit-name "foo")))
-  (is (= "/etc/dnsmasq.d/vpn-kis-split-foo.conf" (s/dnsmasq-path "foo"))))
+  (is (= "/etc/systemd/system/vpn-killswitch-split-foo.service" (s/unit-path "foo")))
+  (is (= "/etc/dnsmasq.d/vpn-kis-split-foo.conf" (s/dnsmasq-path "foo")))
+  (is (= "/etc/vpn-killswitch/split/foo.up.sh" (s/up-script-path "foo")))
+  (is (s/valid-name? "a-b_C9"))
+  (is (not (s/valid-name? "a b")))
+  (is (not (s/valid-name? "")))
+  (is (not (s/valid-name? nil)))
+  (is (= ["a" "b" "c"] (s/conf-names ["/d/b.conf" "/d/a.edn" "/d/c.conf" "/d/a.conf" "/d/x.up.sh"])))
+  (is (= ["vpnkis_split_a_dst"] (s/split-ipsets "vpn_endpoints\nvpnkis_split_a_dst\ntailscale\n"))))
+
+(deftest commands-test
+  (is (= ["iptables" "-t" "mangle" "-D" "VPNKIS-SPLIT" "-m" "set" "--match-set"
+          "vpnkis_split_foo_dst" "dst" "-j" "MARK" "--set-mark" "0x42"]
+         (s/mark-del-cmd "foo" "0x42")))
+  (is (= [["iptables" "-t" "mangle" "-D" "OUTPUT" "-j" "VPNKIS-SPLIT"]
+          ["iptables" "-t" "mangle" "-D" "PREROUTING" "-j" "VPNKIS-SPLIT"]
+          ["iptables" "-t" "mangle" "-F" "VPNKIS-SPLIT"]
+          ["iptables" "-t" "mangle" "-X" "VPNKIS-SPLIT"]]
+         s/chain-teardown-cmds))
+  (is (= ["openvpn" "--config" "/etc/openvpn/x.ovpn" "--dev" "tun-example"
+          "--pull-filter" "ignore" "redirect-gateway"
+          "--pull-filter" "ignore" "dhcp-option DNS"
+          "--route-nopull" "--script-security" "2"
+          "--up" "/etc/vpn-killswitch/split/example.up.sh"
+          "--down" "/etc/vpn-killswitch/split/example.down.sh"]
+         (s/openvpn-argv (assoc example :ovpn-config "/etc/openvpn/x.ovpn")))))
+
+(deftest list-line-test
+  (let [pad (apply str (repeat 15 " "))]
+    (is (= (str "  example" pad "installed (unit: vpn-killswitch-split-example.service)")
+           (s/list-line {:name "example" :installed? true} "vpn-kis")))
+    (is (= (str "  example" pad "configured (run: vpn-kis split add example)")
+           (s/list-line {:name "example" :installed? false} "vpn-kis")))))
+
+(deftest status-report-test
+  (let [report (s/status-report example {:ipset-ok? false
+                                         :rules     "5089:\tfrom all fwmark 0x42 lookup 142\n"
+                                         :routes    ""
+                                         :enabled   "enabled"
+                                         :active    "inactive"})]
+    (is (= [:info "Split 'example':"] (first report)))
+    (is (some #{[:info "  domains   : *.example.com other.example.org"]} report))
+    (is (some #{[:info "  ovpn      : (unset)"]} report))
+    (is (some #{[:warn "  ipset vpnkis_split_example_dst not present"]} report))
+    (is (some #{[:say "  5089:\tfrom all fwmark 0x42 lookup 142"]} report))
+    (is (some #{[:say "  enabled: enabled"]} report))
+    (is (some #{[:say "  active : inactive"]} report))))

@@ -28,7 +28,8 @@
             [vpn-kis-bb.ports.dns :as dns]
             [vpn-kis-bb.ports.endpoint-source :as src]
             [vpn-kis-bb.ports.fetcher :as port]
-            [vpn-kis-bb.ports.http :as http]))
+            [vpn-kis-bb.ports.http :as http]
+            [vpn-kis-bb.domain.re :as rx]))
 
 ;; ---------------------------------------------------------------------------
 ;; Source 1 — the public status API (primary)
@@ -101,15 +102,15 @@
 (defn parse-ovpn-remotes
   "Extract hostnames from `remote <host>` lines in an OpenVPN .ovpn/.conf."
   [content]
-  (->> (str/split-lines (or content ""))
-       (keep #(some-> (re-find #"^\s*remote\s+(\S+)" %) second))))
+  (->> (rx/split-lines* (or content ""))
+       (keep #(some-> (rx/re-find* #"^\s*remote\s+(\S+)" %) second))))
 
 (defn parse-wg-endpoints
   "Extract hostnames from `Endpoint = <host>:<port>` lines (WireGuard)."
   [content]
-  (->> (str/split-lines (or content ""))
+  (->> (rx/split-lines* (or content ""))
        (keep (fn [line]
-               (when-let [m (re-find #"^\s*Endpoint\s*=\s*([^:\s]+)" line)]
+               (when-let [m (rx/re-find* #"^\s*Endpoint\s*=\s*([^:\s]+)" line)]
                  (second m))))))
 
 (defn collect-hosts
@@ -181,7 +182,7 @@
         (r/ok {:provider   :airvpn
                :ips        (-> res :ok :ips)
                :source     (-> res :ok :source)
-               :fetched-at (java.time.Instant/now)})
+               :fetched-at (u/now-iso)})
         res))))
 
 (defn make

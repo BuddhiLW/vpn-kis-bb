@@ -1,17 +1,17 @@
 (ns vpn-kis-bb.ports.iproute
-  "IIpRoute — `ip rule` / `ip route` seam.
-
-   Used by Tailscale coexistence (priority 5100-ish rules) and the
-   split-tunnel feature (per-domain rule → table).")
+  "IIpRoute: the `ip rule` / `ip route` seam. Used by the split-tunnel
+   feature (per-split fwmark rule -> table).")
 
 (defprotocol IIpRoute
   (-rule-show [this]
-    "Returns Result<[{:priority N :selectors {...} :lookup table-name} ...]>
-     Parsed `ip rule show`. Pure data for downstream priority detection.")
+    "Parsed `ip rule show`: Result<[{:priority N :raw \"selectors\"} ...]>
+     (vpn-kis-bb.domain.priority/parse-ip-rule-output); err on a non-zero exit.")
   (-rule-add! [this {:keys [fwmark to lookup priority]}]
-    "Add an ip rule. Returns Result. Idempotent via pre-delete at same priority.")
+    "`ip rule add [fwmark M] [to X] [lookup T] [priority P]`. Returns Result;
+     err on a non-zero exit.")
   (-rule-del! [this priority]
-    "Drop all rules at a given priority. Returns Result.")
+    "`ip rule del priority P`: deletes ONE rule. Always ok, with the
+     command's :exit, so callers can repeat it until it fails (drain).")
   (-route-add! [this {:keys [dst dev table]}]
     "Add a route into a custom table. Returns Result.")
   (-route-replace-default! [this {:keys [dev table]}]

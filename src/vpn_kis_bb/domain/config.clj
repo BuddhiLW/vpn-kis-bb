@@ -1,23 +1,19 @@
 (ns vpn-kis-bb.domain.config
-  "EDN config schema for vpn-kis-bb.
+  "Config parsing for vpn-kis-bb.
 
-   Two config kinds:
+   1. Project-wide  /etc/vpn-killswitch/config.edn (default-project-config).
+   2. Split tunnels /etc/vpn-killswitch/split/<name>.conf in the bash
+      KEY=VALUE format, read exactly as split_load_conf reads it (never
+      sourced), or <name>.edn (a vpn-kis-bb extension, tried first).
+      Validation lives in vpn-kis-bb.domain.split/validate.
 
-   1. Project-wide  /etc/vpn-killswitch/config.edn
-        {:lan-allow [\"192.168.100.0/24\"]
-         :vpn-ports {:udp [1194 443 53 51820]
-                     :tcp [443]}
-         :physical-iface nil}        ; auto-detect when nil
-
-   2. Split-tunnel   /etc/vpn-killswitch/split/<name>.conf  (legacy KEY=VALUE)
-      or            /etc/vpn-killswitch/split/<name>.edn   (preferred)
-      see domain.split/validate for the keys.
-
-   We also tolerate the bash KEY=VALUE format for migration — a parser
-   below normalizes it into the EDN shape."
-  (:require [clojure.edn :as edn]
+   KEY=VALUE parsing uses index-of and string prefixes, no regex
+   (ClojureWasm 1.14.11 corrupts some regex results)."
+  (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.string :as str]
-            [babashka.fs :as fs]))
+            [vpn-kis-bb.domain.re :as rx]
+            [vpn-kis-bb.domain.split :as split]))
 
 (def default-project-config
   {:lan-allow      []
@@ -25,52 +21,111 @@
                     :tcp [443]}
    :physical-iface nil})
 
+(def split-keys
+  "KEY=VALUE keys split_load_conf reads (case-sensitive), and their
+   keywords; other keys are ignored."
+  {"DOMAINS"     :domains
+   "DEV"         :dev
+   "TABLE"       :table
+   "MARK"        :mark
+   "PRIORITY"    :priority
+   "OVPN_CONFIG" :ovpn-config})
+
+(defn- strip-prefix [s x] (if (str/starts-with? s x) (subs s (count x)) s))
+
+(defn- strip-suffix [s x] (if (str/ends-with? s x) (subs s 0 (- (count s) (count x))) s))
+
+(defn unquote-value
+  "bash split_load_conf's quote strip: one trailing then one leading double
+   quote, then one trailing then one leading single quote."
+  [v]
+  (-> v
+      (strip-suffix "\"")
+      (strip-prefix "\"")
+      (strip-suffix "'")
+      (strip-prefix "'")))
+
+(defn parse-key-value-line
+  "[KEY value] for one line of a split conf as split_load_conf reads it:
+   leading blanks allowed, `#` comment lines skipped, KEY one of split-keys
+   written right before the first `=`, the value trimmed and unquoted.
+   nil for any other line."
+  [raw]
+  (let [line (str/triml (or raw ""))
+        i    (str/index-of line "=")]
+    (when (and i (not (str/starts-with? line "#")))
+      (let [k (subs line 0 i)]
+        (when (contains? split-keys k)
+          [k (unquote-value (str/trim (subs line (inc i))))])))))
+
 (defn parse-key-value
-  "Parse the bash-flavored KEY=VALUE format used by the legacy split confs.
-   Returns a keyword-keyed map. Surrounding quotes are stripped."
+  "The split keys (split-keys) of a KEY=VALUE text as a keyword map of
+   strings; a later line wins, other keys are ignored."
   [s]
-  (->> (str/split-lines (or s ""))
-       (keep (fn [raw]
-               (let [line (str/trim raw)]
-                 (when (and (seq line)
-                            (not (str/starts-with? line "#")))
-                   (when-let [m (re-matches #"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$" line)]
-                     (let [k (-> m (nth 1) str/lower-case (str/replace "_" "-") keyword)
-                           v (-> m (nth 2) str/trim)
-                           v (str/replace v #"^[\"']|[\"']$" "")]
-                       [k v]))))))
-       (into {})))
+  (into {}
+        (keep (fn [line]
+                (when-let [[k v] (parse-key-value-line line)]
+                  [(get split-keys k) v])))
+        (rx/split-lines* (or s ""))))
 
 (defn legacy->split-edn
-  "Convert the parsed legacy KEY=VALUE map into our split-config EDN shape."
-  [{:keys [domains dev table mark priority ovpn-config name] :as legacy}]
-  (cond-> (assoc {} :name (or name "unnamed"))
-    domains     (assoc :domains (vec (str/split (str domains) #"\s+")))
-    dev         (assoc :dev dev)
-    table       (assoc :table (parse-long table))
-    mark        (assoc :mark mark)
-    priority    (assoc :priority (if (= priority "auto") :auto (parse-long priority)))
-    ovpn-config (assoc :ovpn-config ovpn-config)))
+  "The parsed KEY=VALUE map in the shape vpn-kis-bb.domain.split/validate
+   takes: DOMAINS split on whitespace, TABLE and PRIORITY as longs when
+   they are digits (PRIORITY \"auto\" as :auto). Blank values are dropped
+   so the defaults apply (bash ${VAR:-default}); anything else is kept as
+   written for validate to judge."
+  [{:keys [name domains dev table mark priority ovpn-config]}]
+  (let [present (fn [s] (when-not (str/blank? s) (str/trim s)))
+        number  (fn [s] (if (split/digits? s) (or (parse-long s) s) s))]
+    (cond-> {:name (or name "unnamed")}
+      (present domains)     (assoc :domains (split/words domains))
+      (present dev)         (assoc :dev (present dev))
+      (present table)       (assoc :table (number (present table)))
+      (present mark)        (assoc :mark (present mark))
+      (present priority)    (assoc :priority (let [p (present priority)]
+                                               (if (= "auto" p) :auto (number p))))
+      (present ovpn-config) (assoc :ovpn-config (present ovpn-config)))))
+
+(defn- read-file
+  "File text, or nil when missing or unreadable."
+  [path]
+  (try
+    (when (fs/exists? path) (slurp (str path)))
+    (catch Throwable _unreadable-means-absent nil)))
 
 (defn read-split-conf
-  "Read /etc/vpn-killswitch/split/<name>.{edn,conf}.
+  "Read split `name` from conf-dir: <name>.edn when it exists (an EDN map),
+   else <name>.conf (KEY=VALUE, parse-key-value + legacy->split-edn).
+   read-fn (path -> text or nil; default: the filesystem) is the seam
+   tests stub.
 
-   Tries .edn first, falls back to .conf (legacy KEY=VALUE). Returns
-   {:ok? true :value <map>} or {:ok? false :error <msg>}."
-  [conf-dir name]
-  (let [edn-path  (fs/path conf-dir (str name ".edn"))
-        conf-path (fs/path conf-dir (str name ".conf"))]
-    (cond
-      (fs/exists? edn-path)
-      (try
-        {:ok? true :value (-> edn-path fs/file slurp edn/read-string
-                              (assoc :name name))}
-        (catch Throwable t
-          {:ok? false :error (str "edn parse error: " (.getMessage t))}))
+   {:ok? true :value <map for domain.split/validate, :name set> :path p}
+   or {:ok? false :error msg} with the bash messages: split: name
+   required, split: name must match [a-zA-Z0-9_-]+, split: config not
+   found: <conf-dir>/<name>.conf."
+  ([conf-dir name] (read-split-conf conf-dir name read-file))
+  ([conf-dir name read-fn]
+   (cond
+     (str/blank? (str name))
+     {:ok? false :error "split: name required"}
 
-      (fs/exists? conf-path)
-      (let [parsed (-> conf-path fs/file slurp parse-key-value)]
-        {:ok? true :value (legacy->split-edn (assoc parsed :name name))})
+     (not (split/valid-name? name))
+     {:ok? false :error "split: name must match [a-zA-Z0-9_-]+"}
 
-      :else
-      {:ok? false :error (str "no config at " edn-path " or " conf-path)})))
+     :else
+     (let [edn-path  (str conf-dir "/" name ".edn")
+           conf-path (str conf-dir "/" name ".conf")
+           edn-text  (read-fn edn-path)]
+       (if (some? edn-text)
+         (try
+           (let [v (edn/read-string edn-text)]
+             (if (or (nil? v) (map? v))
+               {:ok? true :value (assoc v :name name) :path edn-path}
+               {:ok? false :error (str "split: " edn-path " must hold an EDN map")}))
+           (catch Throwable t
+             {:ok? false :error (str "split: EDN parse error in " edn-path ": " (ex-message t))}))
+         (if-let [text (read-fn conf-path)]
+           {:ok?   true
+            :value (legacy->split-edn (assoc (parse-key-value text) :name name))
+            :path  conf-path}
+           {:ok? false :error (str "split: config not found: " conf-path)}))))))

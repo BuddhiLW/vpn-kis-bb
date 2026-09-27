@@ -1,11 +1,10 @@
 (ns vpn-kis-bb.adapters.systemd-shell
-  "ShellSystemdUnit — ISystemdUnit impl via systemctl + filesystem writes.
+  "ShellSystemdUnit: ISystemdUnit over systemctl and unit-file writes.
 
-   File ops go through hive-system's IFilesystem when the caller supplies
-   one (so tests can use an in-memory FS); else a plain spit/rm fallback
-   is used. Privileged write paths land under /etc/systemd/system/."
-  (:require [clojure.string :as str]
-            [babashka.fs :as fs]
+   Unit files go through the :write-fn / :delete-fn the caller supplies
+   (tests record them), else a plain spit / delete fallback. Privileged
+   write paths land under /etc/systemd/system/."
+  (:require [babashka.fs :as fs]
             [hive-dsl.result :as r]
             [hive-system.protocols :as proto]
             [vpn-kis-bb.ports.systemd :as port]))
@@ -27,25 +26,28 @@
 
 (defrecord ShellSystemdUnit [shell write-fn delete-fn]
   port/ISystemdUnit
-  (-write! [_ unit-name body]
+  (-write! [_this unit-name body]
     (write-fn (str unit-dir "/" unit-name) body))
 
-  (-remove! [_ unit-name]
+  (-remove! [_this unit-name]
     (delete-fn (str unit-dir "/" unit-name)))
 
-  (-enable! [_ unit-name]
+  (-enable! [_this unit-name]
     (run shell ["systemctl" "enable" unit-name]))
 
-  (-disable! [_ unit-name]
+  (-start! [_this unit-name]
+    (run shell ["systemctl" "start" unit-name]))
+
+  (-disable! [_this unit-name]
     (run shell ["systemctl" "disable" "--now" unit-name]))
 
-  (-daemon-reload! [_]
+  (-daemon-reload! [_this]
     (run shell ["systemctl" "daemon-reload"]))
 
-  (-active? [_ unit-name]
+  (-active? [_this unit-name]
     (run-exit shell ["systemctl" "is-active" "--quiet" unit-name]))
 
-  (-enabled? [_ unit-name]
+  (-enabled? [_this unit-name]
     (run-exit shell ["systemctl" "is-enabled" "--quiet" unit-name])))
 
 (defn- default-write [path body]

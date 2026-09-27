@@ -7,7 +7,8 @@
   (:require [babashka.fs :as fs]
             [hive-dsl.result :as r]
             [vpn-kis-bb.domain.util :as u]
-            [vpn-kis-bb.ports.fetcher :as port]))
+            [vpn-kis-bb.ports.fetcher :as port]
+            [vpn-kis-bb.domain.re :as rx]))
 
 (def default-dir "/etc/vpn-killswitch/providers")
 
@@ -19,12 +20,12 @@
   (-fetch-ips [_ _opts]
     (let [path (fs/path dir (str (name provider-id) ".ips"))]
       (if (fs/exists? path)
-        (let [lines (-> path fs/file slurp clojure.string/split-lines)
+        (let [lines (-> path fs/file slurp rx/split-lines*)
               ips   (u/normalize-ips lines)]
           (r/ok {:provider    provider-id
                  :ips         ips
                  :source      (str path)
-                 :fetched-at  (java.time.Instant/now)}))
+                 :fetched-at  (u/now-iso)}))
         (r/err :fetcher/no-cache {:provider provider-id :path (str path)})))))
 
 (defn make

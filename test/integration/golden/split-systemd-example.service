@@ -1,5 +1,5 @@
 [Unit]
-Description=VPN Kill-Switch — split 'example' (mark 0x42 -> table 142)
+Description=VPN Kill-Switch: split 'example' (mark 0x42 -> table 142)
 After=network-pre.target
 Before=network.target
 
@@ -8,6 +8,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/sbin/ipset create vpnkis_split_example_dst hash:ip family inet hashsize 1024 maxelem 65536 timeout 3600 -exist
 ExecStart=-/sbin/iptables -t mangle -N VPNKIS-SPLIT
+ExecStart=-/sbin/iptables -t mangle -C OUTPUT -j VPNKIS-SPLIT
 ExecStart=/bin/sh -c '/sbin/iptables -t mangle -C OUTPUT -j VPNKIS-SPLIT 2>/dev/null || /sbin/iptables -t mangle -A OUTPUT -j VPNKIS-SPLIT'
 ExecStart=/bin/sh -c '/sbin/iptables -t mangle -C PREROUTING -j VPNKIS-SPLIT 2>/dev/null || /sbin/iptables -t mangle -A PREROUTING -j VPNKIS-SPLIT'
 ExecStart=/bin/sh -c 'while /sbin/iptables -t mangle -D VPNKIS-SPLIT -m set --match-set vpnkis_split_example_dst dst -j MARK --set-mark 0x42 2>/dev/null; do :; done'

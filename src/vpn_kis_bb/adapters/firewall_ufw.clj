@@ -16,21 +16,13 @@
             [hive-dsl.result :as r]
             [hive-system.protocols :as proto]
             [vpn-kis-bb.domain.rules :as rules]
+            [vpn-kis-bb.domain.util :as u]
             [vpn-kis-bb.ports.firewall :as port]))
 
 (def before-rules-path  "/etc/ufw/before.rules")
 (def before6-rules-path "/etc/ufw/before6.rules")
 
-(def before6-text
-  "*filter
-:ufw6-before-input - [0:0]
-:ufw6-before-output - [0:0]
-:ufw6-before-forward - [0:0]
--A ufw6-before-input -j DROP
--A ufw6-before-output -j DROP
--A ufw6-before-forward -j DROP
-COMMIT
-")
+(def before6-text rules/before6-rules-text)
 
 (defn- run [shell cmd]
   (let [resp (proto/shell-exec! shell cmd {:timeout-ms 60000})]
@@ -54,7 +46,7 @@ COMMIT
                              (let [r (read-fn p)]
                                (assoc acc p (when (r/ok? r) (:ok r)))))
                            {} paths)]
-      (r/ok {:files captured :at (java.time.Instant/now)})))
+      (r/ok {:files captured :at (u/now-iso)})))
 
   (-apply-rules! [_ rule-plan {:keys [dry-run? skip-reset?]}]
     (let [before-txt (rules/before-rules-text rule-plan)]

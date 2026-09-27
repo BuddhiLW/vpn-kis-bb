@@ -11,21 +11,21 @@
 -A ufw-before-input -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 -A ufw-before-output -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# --- LAN allow-list (192.168.100.0/24) ---
--A ufw-before-output -o wlan0 -d 192.168.100.0/24 -j ACCEPT
--A ufw-before-input  -i wlan0 -s 192.168.100.0/24 -j ACCEPT
-
 # --- DHCP ---
 -A ufw-before-output -o wlan0 -p udp --dport 67 -j ACCEPT
 
 # --- NTP ---
 -A ufw-before-output -o wlan0 -p udp --dport 123 -j ACCEPT
 
+# --- LAN allow-list (192.168.100.0/24) ---
+-A ufw-before-output -o wlan0 -d 192.168.100.0/24 -j ACCEPT
+-A ufw-before-input  -i wlan0 -s 192.168.100.0/24 -j ACCEPT
+
 # --- DNS on physical IF (resolve VPN hosts) ---
 -A ufw-before-output -o wlan0 -p udp --dport 53 -j ACCEPT
 -A ufw-before-output -o wlan0 -p tcp --dport 53 -j ACCEPT
 
-# --- HTTPS auth (Eddie/Mullvad API) ---
+# --- Eddie HTTPS auth ---
 -A ufw-before-output -o wlan0 -p tcp --dport 443 -j ACCEPT
 
 # --- VPN tunnel ports (any host) ---

@@ -6,33 +6,54 @@
      :dry-run — RecordingShell + recording write-fn; nothing touches the
                 live system. Use this to preview plans.
 
+   Both profiles READ the live system (files via :read-fn, HTTP/DNS via a
+   live shell): reads are harmless and a plan is only useful when it is
+   computed from real state.
+
+   The adapters wired here are portable across Babashka and ClojureWasm:
+   HTTP goes through curl and DNS through getent (the JVM-only
+   http-jvm / dns-inetaddress adapters remain available to bb callers).
+
    Tests use a tailored recording-system constructed by the test file
    itself (see test/vpn_kis_bb/app/split_test.clj) rather than going
    through make-system."
   (:require [babashka.fs :as fs]
             [hive-dsl.result :as r]
             [hive-system.shell.core :as shell-core]
-            [vpn-kis-bb.adapters.dns-inetaddress :as dns]
+            [vpn-kis-bb.adapters.dns-getent :as dns]
             [vpn-kis-bb.adapters.dnsmasq-shell :as dnsmasq]
             [vpn-kis-bb.adapters.fetcher.airvpn :as airvpn]
-            [vpn-kis-bb.adapters.fetcher.custom :as custom]
             [vpn-kis-bb.adapters.fetcher.mullvad :as mullvad]
-            [vpn-kis-bb.adapters.fetcher.ovpn-file :as ovpn-file]
             [vpn-kis-bb.adapters.fetcher.tailscale :as tailscale]
             [vpn-kis-bb.adapters.firewall-ufw :as fw]
-            [vpn-kis-bb.adapters.http-jvm :as http]
+            [vpn-kis-bb.adapters.http-curl :as http]
             [vpn-kis-bb.adapters.iproute-shell :as ipr]
             [vpn-kis-bb.adapters.ipset-shell :as ipset]
             [vpn-kis-bb.adapters.shell-recording :as rec]
-            [vpn-kis-bb.adapters.systemd-shell :as sd]))
+            [vpn-kis-bb.adapters.systemd-shell :as sd]
+            [vpn-kis-bb.domain.settings :as settings]
+            [clojure.java.shell :as sh]
+            [vpn-kis-bb.app.tailscale :as tailscale-app]
+            [vpn-kis-bb.adapters.nm-dispatcher :as nm-dispatcher]))
 
-(defn- prod-write [path body]
-  (try
-    (fs/create-dirs (fs/parent path))
-    (spit path body)
-    (r/ok {:path path :bytes (count body)})
-    (catch Throwable t
-      (r/err :fs/write-failed {:path path :cause (str t)}))))
+(defn- prod-write
+  "Write body to path atomically: a sibling temp file, given the old file's
+   mode and owner when there is one, renamed over the target. A crash
+   never leaves a half-written system file (before.rules, units, hooks)."
+  [path body]
+  (let [target (str path)
+        tmp    (str target ".vpn-kis-new")]
+    (try
+      (fs/create-dirs (fs/parent target))
+      (spit tmp body)
+      (when (fs/exists? target)
+        (sh/sh "chmod" "--reference" target tmp)
+        (sh/sh "chown" "--reference" target tmp))
+      (fs/move tmp target {:replace-existing true :atomic-move true})
+      (r/ok {:path path :bytes (count body)})
+      (catch Throwable t
+        (fs/delete-if-exists tmp)
+        (r/err :fs/write-failed {:path path :cause (str t)})))))
 
 (defn- prod-delete [path]
   (try
@@ -49,43 +70,66 @@
   (println (str "[dry-run] delete " path))
   (r/ok {:path path :dry-run? true}))
 
+(defn live-read
+  "path -> file contents, or nil when missing/unreadable."
+  [path]
+  (try
+    (when (fs/exists? path) (slurp (str path)))
+    (catch Throwable _ nil)))
+
 (defn- build-fetchers
-  "Construct the fetcher registry: provider-name → IProviderFetcher."
-  [http-fetcher resolver]
-  {:mullvad   (mullvad/make    http-fetcher resolver)
+  "Construct the fetcher registry: provider-name -> IProviderFetcher.
+   read-fn lets the Mullvad fetcher add the daemon's relay cache."
+  [http-fetcher resolver read-fn]
+  {:mullvad   (mullvad/make    http-fetcher resolver {:read-fn read-fn})
    :airvpn    (airvpn/make     http-fetcher resolver)
    :tailscale (tailscale/make  http-fetcher resolver)})
 
 (defn make-system
   "Build the wired system map.
 
-   opts: {:profile :prod|:dry-run, :recorded-shell <RecordingShell>?}"
-  [{:keys [profile recorded-shell]
+   opts: {:profile :prod|:dry-run, :recorded-shell <RecordingShell>?,
+          :env {\"NAME\" \"value\"}?  (defaults to the process environment)}
+
+   :install-tailscale! and :install-nm-dispatcher! are the hooks setup!
+   calls at its end (fns of [system opts] returning a Result)."
+  [{:keys [profile recorded-shell env]
     :or {profile :prod}}]
-  (let [shell    (case profile
-                   :prod    (shell-core/make-shell)
-                   :dry-run (or recorded-shell (rec/make)))
-        write    (case profile :prod prod-write    :dry-run dry-run-write)
-        delete   (case profile :prod prod-delete   :dry-run dry-run-delete)
-        http-f   (http/make-jvm-fetcher)
-        resolver (dns/make-resolver)
-        fw-impl  (fw/make shell {:write-fn write})
-        ipset-i  (ipset/make shell)
-        iproute  (ipr/make   shell)
-        systemd  (sd/make    shell {:write-fn write :delete-fn delete})
-        dns-i    (dnsmasq/make shell {:write-fn write :delete-fn delete})]
-    {:profile  profile
-     :shell    shell
-     :http     http-f
-     :dns      resolver
-     :firewall fw-impl
-     :ipset    ipset-i
-     :iproute  iproute
-     :systemd  systemd
-     :dnsmasq  dns-i
-     :write-fn write
-     :delete-fn delete
-     :fetchers (build-fetchers http-f resolver)}))
+  (let [env        (or env (into {} (System/getenv)))
+        cfg        (settings/from-env env)
+        live-shell (shell-core/make-shell)
+        shell      (case profile
+                     :prod    live-shell
+                     :dry-run (or recorded-shell (rec/make)))
+        write      (case profile :prod prod-write    :dry-run dry-run-write)
+        delete     (case profile :prod prod-delete   :dry-run dry-run-delete)
+        http-f     (http/make live-shell)
+        resolver   (dns/make-resolver live-shell {:fallback-servers (:dns-bootstrap cfg)})
+        fw-impl    (fw/make shell {:write-fn write})
+        ipset-i    (ipset/make shell)
+        iproute    (ipr/make   shell)
+        systemd    (sd/make    shell {:write-fn write :delete-fn delete})
+        dns-i      (dnsmasq/make shell {:write-fn write :delete-fn delete})]
+    {:profile    profile
+     :env        env
+     :settings   cfg
+     :self-path  (or (:self-path cfg) "vpn-kis")
+     :shell      shell
+     :live-shell live-shell
+     :http       http-f
+     :dns        resolver
+     :firewall   fw-impl
+     :ipset      ipset-i
+     :iproute    iproute
+     :systemd    systemd
+     :dnsmasq    dns-i
+     :write-fn   write
+     :delete-fn  delete
+     :read-fn    live-read
+     :fetchers   (build-fetchers http-f resolver live-read)
+     :install-tailscale!     (fn [sys opts]
+                               (tailscale-app/install! sys (assoc opts :nm-dispatcher? false)))
+     :install-nm-dispatcher! (fn [sys _opts] (nm-dispatcher/install! sys))}))
 
 (defn dry-run-system
   "Convenience: build a :dry-run system. Returns {:system .. :shell ..}

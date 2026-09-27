@@ -1,199 +1,366 @@
 (ns vpn-kis-bb.cli.main
-  "CLI entry. Dispatch matches the bash 1:1 for muscle-memory."
-  (:require [babashka.cli :as cli]
-            [clojure.string :as str]
+  "CLI entry: bash `main` of vpn-firewall-setup.sh, command for command.
+
+   `run` parses argv, builds the system (--dry-run records commands instead
+   of running them), checks root where the bash did and dispatches. Every
+   handler takes a context {:system :opts :prog} plus the command's
+   arguments and returns the exit code; -main only adds the process exit."
+  (:require [clojure.string :as str]
             [hive-dsl.result :as r]
+            [hive-system.protocols :as proto]
+            [vpn-kis-bb.adapters.exec :as exec]
             [vpn-kis-bb.app.detect :as detect]
+            [vpn-kis-bb.app.exclude :as exclude]
             [vpn-kis-bb.app.fetch :as fetch]
+            [vpn-kis-bb.app.nm-dispatch :as nm-dispatch]
             [vpn-kis-bb.app.panic :as panic]
-            [vpn-kis-bb.app.providers :as providers]
+            [vpn-kis-bb.app.refresh :as refresh]
+            [vpn-kis-bb.app.selftest :as selftest]
             [vpn-kis-bb.app.setup :as setup]
-            [vpn-kis-bb.app.split :as split-app]
+            [vpn-kis-bb.app.split :as split]
+            [vpn-kis-bb.app.tailscale :as tailscale]
+            [vpn-kis-bb.app.tailscale-web :as tailscale-web]
             [vpn-kis-bb.app.unlock :as unlock]
-            [vpn-kis-bb.app.verify :as verify]
-            [vpn-kis-bb.cli.system :as sys-root]
-            [vpn-kis-bb.domain.config :as config]
-            [vpn-kis-bb.domain.split :as split-d]))
+            [vpn-kis-bb.cli.args :as args]
+            [vpn-kis-bb.cli.system :as system]
+            [vpn-kis-bb.cli.usage :as usage]
+            [vpn-kis-bb.domain.exclude :as exclude-d]
+            [vpn-kis-bb.domain.refresh :as refresh-d]
+            [vpn-kis-bb.domain.selftest :as selftest-d]
+            [vpn-kis-bb.log :as log]))
 
-(def known-providers [:mullvad :airvpn :tailscale])
+;; ---------------------------------------------------------------- output
 
-(def global-spec
-  {:dry-run        {:coerce :boolean :desc "Preview the plan, no privileged ops"}
-   :physical-iface {:coerce :string  :desc "Override auto-detected physical iface"}
-   :lan            {:coerce []       :desc "LAN CIDR(s) to bypass killswitch"}
-   :help           {:coerce :boolean}})
+(defn- reason
+  "Printable cause of an error Result."
+  [res]
+  (or (:hint res) (:message res) (some-> (:error res) str) (pr-str res)))
 
-(defn- build-system [{:keys [dry-run]}]
-  (sys-root/make-system {:profile (if dry-run :dry-run :prod)}))
+(defn- fail
+  "Print an error Result as bash `error` does (the whole value too when
+   VPN_KIS_DEBUG=1). Exit code 1."
+  [ctx res]
+  (log/error (reason res))
+  (when (= "1" (get-in ctx [:system :env "VPN_KIS_DEBUG"]))
+    (log/error (pr-str res)))
+  1)
 
-(defn- print-result [tag r]
-  (println (str "[" tag "] " (if (r/ok? r) "ok" "error")))
-  (println (pr-str r))
-  (System/exit (if (r/ok? r) 0 1)))
+(defn- usage-error [ctx msg]
+  (fail ctx (r/err :cli/usage {:hint msg})))
 
-;; ---------------------------------------------------------------- subcommands
+(defn- done
+  "Exit code of a workflow Result: 0 when ok, else printed and 1."
+  [ctx res]
+  (if (r/ok? res) 0 (fail ctx res)))
 
-(defn- cmd-help [_ _]
-  (println
-   "vpn-kis-bb — Babashka kill-switch (sibling of BuddhiLW/vpn-kis)
+(defn- print-lines
+  "Report lines: strings go to stdout, {:level :text} maps by level."
+  [lines]
+  (doseq [l lines]
+    (if (map? l)
+      (case (:level l)
+        :info  (log/info (:text l))
+        :warn  (log/warn (:text l))
+        :error (log/error (:text l))
+        (log/say (:text l)))
+      (log/say (str l)))))
 
-Usage:
-  vpn-kis-bb setup [--strict] [--providers p1,p2] [--lan CIDR]
-  vpn-kis-bb fetch [provider ...]
-  vpn-kis-bb providers <name> [<name> ...]
-  vpn-kis-bb auto
-  vpn-kis-bb detect
-  vpn-kis-bb split add|rm|list|status|connect <name>
-  vpn-kis-bb test
-  vpn-kis-bb unlock
-  vpn-kis-bb panic
-  vpn-kis-bb help
+;; ---------------------------------------------------------------- context
 
-Global flags (before any subcommand):
-  --dry-run               Print the plan, no privileged ops
-  --physical-iface IF     Override auto-detection
-  --lan CIDR              LAN CIDR(s) to bypass killswitch
+(defn- dry-run? [ctx] (boolean (get-in ctx [:opts :dry-run?])))
 
-Providers: mullvad, airvpn, tailscale, plus any /etc/vpn-killswitch/providers/*.ips"))
+(defn- live
+  "The system with its live shell: for read-only probes, which a dry run
+   must still see (detect, auto)."
+  [system]
+  (assoc system :shell (:live-shell system)))
 
-(defn- cmd-fetch [opts args]
-  (let [sys     (build-system opts)
-        targets (or (seq (map keyword args)) known-providers)
-        result  (fetch/fetch-many! sys targets)]
-    (print-result "fetch" result)))
+(defn euid-zero?
+  "True when the process runs as root (`id -u` through the live shell)."
+  [system]
+  (let [res (proto/shell-exec! (:live-shell system) ["id" "-u"] {})]
+    (and (r/ok? res) (= "0" (str/trim (str (-> res :ok :stdout)))))))
 
-(defn- cmd-providers [opts args]
-  (when (empty? args)
-    (println "providers: specify at least one provider name")
-    (System/exit 1))
-  (let [sys (build-system opts)
-        union (providers/load-union (map keyword args))]
-    (if (r/err? union)
-      (print-result "providers" union)
-      (do (println (str "Locking to " (count (-> union :ok :union))
-                        " endpoints from: " (str/join " " args)))
-          (let [r (setup/setup! sys {:mode :strict
-                                     :providers (map keyword args)
-                                     :lan-allow (or (:lan opts) [])
-                                     :physical-iface (:physical-iface opts)
-                                     :dry-run? (:dry-run opts)})]
-            (print-result "providers" r))))))
+(defn- root? [ctx]
+  (if (contains? ctx :root?) (:root? ctx) (euid-zero? (:system ctx))))
 
-(defn- cmd-setup [opts _args]
-  (let [sys (build-system opts)
-        r (setup/setup! sys {:mode :permissive
-                             :lan-allow (or (:lan opts) [])
-                             :physical-iface (:physical-iface opts)
-                             :dry-run? (:dry-run opts)})]
-    (print-result "setup" r)))
+(defn- as-root
+  "bash require_root: run f, or refuse unless root (a dry run never needs it)."
+  [ctx f]
+  (if (or (dry-run? ctx) (root? ctx))
+    (f)
+    (fail ctx (r/err :cli/not-root {:hint "Run as root or with sudo"}))))
 
-(defn- cmd-auto [opts _]
-  (let [sys (build-system opts)
-        det (detect/detect-endpoints sys)]
-    (if (or (r/err? det) (empty? (:ok det)))
-      (do (println "auto: no live VPN endpoints detected — connect VPN first")
-          (System/exit 1))
-      (let [ips (:ok det)
-            _ (println (str "Locking to live endpoints: "
-                            (str/join " " (sort ips))))
-            r (setup/setup! sys {:mode :strict
-                                 :physical-iface (:physical-iface opts)
-                                 :dry-run? (:dry-run opts)})]
-        (print-result "auto" r)))))
+(defn context
+  "Handler context: the wired system (profile from --dry-run; --lan and
+   --physical-iface override the env settings) and the parsed opts."
+  [opts env]
+  (let [sys       (system/make-system {:profile (if (:dry-run? opts) :dry-run :prod)
+                                       :env     env})
+        overrides (cond-> {}
+                    (seq (:lan opts))      (assoc :lan-allow (vec (:lan opts)))
+                    (:physical-iface opts) (assoc :physical-iface (:physical-iface opts)))]
+    {:system (update sys :settings merge overrides)
+     :opts   opts
+     :prog   (get-in sys [:settings :prog])}))
 
-(defn- cmd-detect [opts _]
-  (let [sys (build-system opts)
-        r (detect/detect-endpoints sys)]
-    (if (r/err? r)
-      (print-result "detect" r)
-      (do (println (str "Detected VPN endpoints: "
-                        (str/join " " (sort (:ok r)))))
-          (System/exit 0)))))
+;; ---------------------------------------------------------------- setup family
 
-(defn- cmd-unlock [opts _]
-  (let [sys (build-system opts)
-        r (unlock/unlock! sys {:dry-run? (:dry-run opts)})]
-    (print-result "unlock" r)))
+(defn- setup-opts
+  "setup! options shared by setup, auto and providers. LAN CIDRs come from
+   the settings (LAN_ALLOW_CIDRS, overridden by --lan in `context`)."
+  [{:keys [system] :as ctx} mode-opts]
+  (merge {:physical-iface (get-in system [:settings :physical-iface])
+          :dry-run?       (dry-run? ctx)}
+         mode-opts))
 
-(defn- cmd-panic [opts _]
-  (let [sys (build-system opts)
-        r (panic/panic! sys {:dry-run? (:dry-run opts)})]
-    (print-result "panic" r)))
+(defn- run-setup [ctx mode-opts]
+  (done ctx (setup/setup! (:system ctx) (setup-opts ctx mode-opts))))
 
-(defn- cmd-test [opts _]
-  (let [sys (build-system opts)
-        r (verify/verify sys)
-        report (:ok r)]
-    (println (str "Checks: " (count (:checks report))
-                  "  Failed: " (count (:failed report))))
-    (doseq [c (:checks report)]
-      (println (str "  " (if (:pass? c) "[PASS]" "[fail]") " " (:name c))))
-    (System/exit (if (:ok? report) 0 1))))
+(defn cmd-setup
+  "bash `setup` (the default): strict when VPN_ENDPOINTS is set."
+  [ctx _args]
+  (let [eps (get-in ctx [:system :settings :endpoints])]
+    (run-setup ctx (if (seq eps)
+                     {:mode :strict :endpoints (vec eps)}
+                     {:mode :permissive}))))
 
-(defn- cmd-split [opts args]
-  (let [sub  (first args)
-        name (second args)
-        sys  (build-system opts)]
+(defn cmd-auto
+  "bash `auto`: strict-lock to the live VPN peers."
+  [{:keys [system] :as ctx} _args]
+  (log/info "Auto-detecting VPN endpoints...")
+  (let [ips (sort (:ok (detect/detect-endpoints (live system))))]
+    (if (empty? ips)
+      (usage-error ctx (str "No active VPN detected. Connect VPN first, then rerun with 'auto'."
+                            " Or use 'setup' for permissive mode, or set VPN_ENDPOINTS=... manually."))
+      (do (log/info "Locking to endpoints: " (str/join " " ips))
+          (run-setup ctx {:mode :strict :endpoints (vec ips)})))))
+
+(defn- known-providers [system]
+  (str/join " " (sort (map name (keys (:fetchers system))))))
+
+(defn cmd-providers
+  "bash `providers`: strict-lock to the union of the cached provider lists.
+   setup! loads them, warns about missing ones, writes providers.active
+   for `refresh` and refuses when no IP is loaded."
+  [{:keys [system] :as ctx} names]
+  (if (empty? names)
+    (usage-error ctx (str "providers: specify at least one provider name. Known: "
+                          (known-providers system)))
+    (run-setup ctx {:mode :strict :providers (vec names)})))
+
+;; ---------------------------------------------------------------- endpoints
+
+(defn cmd-fetch
+  "bash `fetch`: refresh each named provider list (default: the built-in
+   ones). Exit code = number of failures, as in the bash."
+  [{:keys [system]} names]
+  (let [targets (if (seq names) names (map name fetch/builtin-providers))
+        failed  (count (filter r/err? (mapv #(fetch/fetch-provider! system %) targets)))]
+    (when (pos? failed)
+      (log/warn failed " provider(s) failed"))
+    (min failed 255)))
+
+(defn cmd-refresh
+  "bash `refresh`: rebuild the endpoint sets, or install/remove the timer."
+  [{:keys [system] :as ctx} args]
+  (let [{:keys [op interval names]} (refresh-d/parse-command args)]
+    (done ctx (case op
+                :install (refresh/install-timer! system interval)
+                :remove  (refresh/remove-timer! system)
+                (refresh/refresh! system names)))))
+
+(defn cmd-detect
+  "bash `detect`."
+  [{:keys [system]} _args]
+  (let [ips (sort (:ok (detect/detect-endpoints (live system))))]
+    (if (empty? ips)
+      (do (log/warn "No active VPN endpoints detected. Connect VPN first.") 1)
+      (do (log/info "Detected VPN endpoints: " (str/join " " ips)) 0))))
+
+;; ---------------------------------------------------------------- recovery
+
+(defn cmd-unlock [ctx _args]
+  (done ctx (unlock/unlock! (:system ctx) {:dry-run? (dry-run? ctx)})))
+
+(defn cmd-panic [ctx _args]
+  (done ctx (panic/panic! (:system ctx) {:dry-run? (dry-run? ctx)})))
+
+;; ---------------------------------------------------------------- tailscale
+
+(defn cmd-tailscale-routes
+  "bash `tailscale-routes [apply|install|remove]`."
+  [{:keys [system] :as ctx} [sub]]
+  (case (or sub "apply")
+    ("apply" "_apply") (done ctx (tailscale/apply! system {}))
+    "install"          (done ctx (tailscale/install! system {}))
+    ("remove" "rm")    (done ctx (tailscale/remove! system {}))
+    (usage-error ctx (str "tailscale-routes: unknown subcommand '" sub
+                          "'. Try: apply|install|remove"))))
+
+(defn cmd-tailscale-web
+  "bash `tailscale-web [apply|remove]`."
+  [{:keys [system] :as ctx} [sub]]
+  (done ctx (tailscale-web/run! system (or sub "apply"))))
+
+(defn cmd-nm-dispatch
+  "NetworkManager hook entry (the hook execs `<self> nm-dispatch IF ACTION`).
+   Always exits 0: a failing hook must not disturb NetworkManager."
+  [{:keys [system]} [iface action]]
+  (let [res (nm-dispatch/handle! system iface action)]
+    (when (r/err? res)
+      (log/warn "nm-dispatch " iface " " action ": " (reason res)))
+    0))
+
+;; ---------------------------------------------------------------- split
+
+(defn cmd-split
+  "bash `split add|rm|list|status|connect`. The workflows print their own
+   reports; connect hands openvpn the terminal through the launcher."
+  [{:keys [system] :as ctx} [sub name]]
+  (let [sub   (or sub "list")
+        named (fn [f]
+                (if (str/blank? name)
+                  (usage-error ctx (str "split " sub ": name required"))
+                  (f)))]
     (case sub
-      "add"
-      (let [conf-r (config/read-split-conf split-d/conf-dir name)]
-        (if-not (:ok? conf-r)
-          (do (println (:error conf-r)) (System/exit 1))
-          (print-result "split add" (split-app/install! sys (:value conf-r)))))
+      ("add" "install")
+      (as-root ctx #(named (fn [] (done ctx (split/install! system name)))))
 
-      ("rm" "remove" "delete")
-      (print-result "split rm" (split-app/remove! sys name))
+      ("rm" "remove" "del" "delete")
+      (as-root ctx #(named (fn [] (done ctx (split/remove! system name)))))
 
-      ("list" "ls" nil)
-      (do (doseq [n (split-app/list-installed)]
-            (println n))
-          (System/exit 0))
+      ("ls" "list")
+      (done ctx (split/list-installed system))
 
       "status"
-      (let [r (split-app/status sys name)]
-        (println (pr-str r))
-        (System/exit 0))
+      (done ctx (split/status system name))
 
       ("connect" "up")
-      (let [conf-r (config/read-split-conf split-d/conf-dir name)]
-        (if-not (:ok? conf-r)
-          (do (println (:error conf-r)) (System/exit 1))
-          (print-result "split connect" (split-app/connect! sys (:value conf-r)))))
+      (as-root ctx #(named (fn []
+                             (let [plan (split/connect-plan system name)]
+                               (if (r/err? plan)
+                                 (fail ctx plan)
+                                 (done ctx (exec/exec! system (-> plan :ok :argv) {})))))))
 
-      (do (println (str "split: unknown subcommand: " sub))
-          (System/exit 1)))))
+      (usage-error ctx (str "split: unknown subcommand '" sub
+                            "'. Try: add|rm|list|status|connect")))))
+
+;; ---------------------------------------------------------------- exclude
+
+(defn- exclude-run [{:keys [system] :as ctx} args]
+  (let [prep (exclude/prepare-run! system args)]
+    (if (r/err? prep)
+      (fail ctx prep)
+      (let [{:keys [argv cgroup-procs]} (:ok prep)]
+        (done ctx (exec/exec! system argv {:cgroup-procs cgroup-procs}))))))
+
+(defn cmd-exclude
+  "bash `exclude run|on|off|status`."
+  [{:keys [system prog] :as ctx} [sub & more]]
+  (case (or sub "status")
+    ("run" "exec")
+    (as-root ctx #(exclude-run ctx more))
+
+    ("on" "enable" "add" "install")
+    (as-root ctx #(let [res (exclude/enable! system)]
+                    (if (r/ok? res)
+                      (do (log/info (exclude-d/enabled-message prog)) 0)
+                      (fail ctx res))))
+
+    ("off" "disable" "rm" "remove" "del" "delete")
+    (as-root ctx #(done ctx (exclude/disable! system)))
+
+    ("status" "ls" "list" "show")
+    (let [res (exclude/status system)]
+      (if (r/ok? res)
+        (do (print-lines (exclude-d/status-lines (:ok res))) 0)
+        (fail ctx res)))
+
+    "_apply"
+    (as-root ctx #(done ctx (exclude/apply-routing! system)))
+
+    "_teardown"
+    (as-root ctx #(done ctx (exclude/teardown-routing! system)))
+
+    (usage-error ctx (str "exclude: unknown subcommand '" sub "'. Try: run|on|off|status"))))
+
+;; ---------------------------------------------------------------- test
+
+(defn- report-tests
+  "Print self-test results and the bash `summary`; exit 1 on any FAIL."
+  [ctx res]
+  (if (r/err? res)
+    (fail ctx res)
+    (let [{:keys [results passed failed reason]} (:ok res)]
+      (print-lines (selftest-d/result-lines results))
+      (if (= :declined reason)
+        0
+        (do (log/say "")
+            (log/info (selftest-d/summary-line passed failed))
+            (if (zero? failed) 0 1))))))
+
+(defn cmd-test
+  "bash `test [passive|active]`."
+  [{:keys [system] :as ctx} [mode]]
+  (case (or mode "passive")
+    "passive" (report-tests ctx (selftest/passive system))
+    "active"  (report-tests ctx (selftest/active system))
+    (usage-error ctx "test mode must be 'passive' or 'active'")))
+
+(defn cmd-help [ctx _args]
+  (log/say (usage/text (:prog ctx)))
+  0)
 
 ;; ---------------------------------------------------------------- dispatch
 
 (def commands
-  {"help"      cmd-help
-   "-h"        cmd-help
-   "--help"    cmd-help
-   "setup"     cmd-setup
-   "fetch"     cmd-fetch
-   "providers" cmd-providers
-   "auto"      cmd-auto
-   "detect"    cmd-detect
-   "split"     cmd-split
-   "test"      cmd-test
-   "unlock"    cmd-unlock
-   "panic"     cmd-panic
-   "rescue"    cmd-panic
-   "emergency" cmd-panic})
+  "Command word -> {:run handler :root? bool}: the arms of bash `main`.
+   split and exclude check root per subcommand, as the bash does."
+  {"help"             {:run cmd-help}
+   "-h"               {:run cmd-help}
+   "--help"           {:run cmd-help}
+   "setup"            {:run cmd-setup :root? true}
+   "auto"             {:run cmd-auto :root? true}
+   "providers"        {:run cmd-providers :root? true}
+   "fetch"            {:run cmd-fetch :root? true}
+   "refresh"          {:run cmd-refresh :root? true}
+   "detect"           {:run cmd-detect :root? true}
+   "unlock"           {:run cmd-unlock :root? true}
+   "panic"            {:run cmd-panic :root? true}
+   "rescue"           {:run cmd-panic :root? true}
+   "emergency"        {:run cmd-panic :root? true}
+   "tailscale-routes" {:run cmd-tailscale-routes :root? true}
+   "tailscale-web"    {:run cmd-tailscale-web :root? true}
+   "test"             {:run cmd-test :root? true}
+   "nm-dispatch"      {:run cmd-nm-dispatch :root? true}
+   "split"            {:run cmd-split}
+   "exclude"          {:run cmd-exclude}})
 
-(defn parse-args
-  "Pure: split argv into {:global-opts ... :cmd ... :cmd-args [...]}."
-  [argv]
-  (let [{:keys [opts args]} (cli/parse-args argv {:spec global-spec})
-        [cmd & rest]        args]
-    {:global-opts opts
-     :cmd         (or cmd "help")
-     :cmd-args    (vec rest)}))
+(defn dispatch
+  "Run command `cmd` with `args` in context `ctx`; returns the exit code."
+  [ctx cmd args]
+  (if-let [{:keys [run root?]} (get commands cmd)]
+    (if root?
+      (as-root ctx #(run ctx args))
+      (run ctx args))
+    (do (log/say (usage/text (:prog ctx)))
+        (log/error "Unknown command: " cmd)
+        1)))
+
+(defn run
+  "argv + environment map -> exit code."
+  [argv env]
+  (let [{:keys [error cmd args opts]} (args/parse argv)]
+    (if error
+      (do (log/error error) 1)
+      (dispatch (context opts env) cmd args))))
 
 (defn -main [& argv]
-  (let [{:keys [global-opts cmd cmd-args]} (parse-args argv)]
-    (if-let [f (get commands cmd)]
-      (f global-opts cmd-args)
-      (do (println (str "unknown command: " cmd))
-          (cmd-help nil nil)
-          (System/exit 1)))))
+  (let [code (try
+               (run argv (into {} (System/getenv)))
+               (catch Throwable t
+                 (log/error "vpn-kis: " (or (ex-message t) (str t)))
+                 70))]
+    (flush)
+    (System/exit code)))
