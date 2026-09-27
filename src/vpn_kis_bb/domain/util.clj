@@ -17,7 +17,10 @@
    anything that doesn't match `ipv4?`."
   [coll]
   (into (sorted-set)
-        (comp (map #(some-> % str/trim))
+        ;; `str` first so non-string inputs (e.g. a numeric IP field from a
+        ;; provider's JSON) coerce to a string and get rejected by ipv4?
+        ;; rather than throwing ClassCastException inside str/trim.
+        (comp (map #(some-> % str str/trim))
               (remove (some-fn nil? str/blank? #(str/starts-with? % "#")))
               (filter ipv4?))
         coll))

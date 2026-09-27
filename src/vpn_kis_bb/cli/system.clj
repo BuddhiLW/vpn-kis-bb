@@ -53,7 +53,7 @@
   "Construct the fetcher registry: provider-name → IProviderFetcher."
   [http-fetcher resolver]
   {:mullvad   (mullvad/make    http-fetcher resolver)
-   :airvpn    (airvpn/make     resolver)
+   :airvpn    (airvpn/make     http-fetcher resolver)
    :tailscale (tailscale/make  http-fetcher resolver)})
 
 (defn make-system
