@@ -31,7 +31,7 @@
 (def openclaw-list ["nft" "list" "table" "inet" "hive_openclaw_client"])
 (def pid-show ["systemctl" "show" "-p" "MainPID" "--value" "tailscaled"])
 (def split-list ["mullvad" "split-tunnel" "list"])
-(def split-add ["mullvad" "split-tunnel" "add" "4242"])
+(def split-del ["mullvad" "split-tunnel" "delete" "4242"])
 (def sd-reload ["systemctl" "daemon-reload"])
 (def unit-enable ["systemctl" "enable" "vpn-killswitch-tailscale-routes.service"])
 (def unit-restart ["systemctl" "restart" "vpn-killswitch-tailscale-routes.service"])
@@ -62,7 +62,7 @@
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
         "\t\ttype route hook output priority mangle; policy accept;"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v2\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
         "\t}"
         "}"))
 
@@ -145,25 +145,23 @@
         [res err] (capture-err #(app/apply! (:system h) {}))]
     (is (= {:nft                  {:status :applied :dests dests :dropped [] :source :table}
             :legacy-rules-removed 0
-            :tailscaled           {:status :excluded :pid "4242"}
+            :tailscaled           {:status :not-listed :pid "4242"}
             :web                  {:status :disabled}}
            (:ok res)))
-    (is (= [t52 nft-list nft-load rule-show pid-show split-list split-add] (cmds h)))
+    (is (= [t52 nft-list nft-load rule-show pid-show split-list] (cmds h)))
     (is (= [[cidrs-file (text "100.64.0.0/10" "10.244.0.0/16" "10.96.0.0/12" "192.168.100.0/24")]]
            @(:writes h)))
     (testing "progress lines, as the bash prints them"
       (is (str/includes? err (str "[+] Tailnet bypasses Mullvad by mark (nft table inet"
                                   " vpn-killswitch-tailscale): 100.64.0.0/10 10.244.0.0/16"
-                                  " 10.96.0.0/12 192.168.100.0/24")))
-      (is (str/includes? err "[+] tailscaled (pid 4242) excluded from Mullvad")))))
+                                  " 10.96.0.0/12 192.168.100.0/24"))))))
 
 (deftest apply-is-a-no-op-when-current
   (let [h   (harness {:files {cidrs-file (d/cidrs-text dests)}
-                      :table {nft-list   {:stdout live-table}
-                              split-list {:stdout "Excluded PIDs:\n    4242\n"}}})
+                      :table {nft-list {:stdout live-table}}})
         res (app/apply! (:system h) {})]
     (is (= :current (-> res :ok :nft :status)))
-    (is (= {:status :listed :pid "4242"} (-> res :ok :tailscaled)))
+    (is (= {:status :not-listed :pid "4242"} (-> res :ok :tailscaled)))
     (is (= [t52 nft-list rule-show pid-show split-list] (cmds h)))
     (is (= [] @(:writes h)))))
 
@@ -191,7 +189,7 @@
 
 (deftest apply-reloads-an-older-table-version
   (let [h (harness {:files {cidrs-file (d/cidrs-text dests)}
-                    :table {nft-list {:stdout (str/replace live-table "v2" "v1")}}})]
+                    :table {nft-list {:stdout (str/replace live-table "v3" "v2")}}})]
     (is (= :applied (-> (app/apply! (:system h) {}) :ok :nft :status)))))
 
 (deftest apply-retires-legacy-rules-after-the-marks
@@ -223,7 +221,7 @@
     (is (= {:status :no-nft} (-> res :ok :nft)))
     (is (str/includes? err "[!] nft not found, Mullvad will capture tailnet traffic"))
     (testing "no marks, so the old rules stay (make-before-break)"
-      (is (= [pid-show split-list split-add] (cmds h))))))
+      (is (= [pid-show split-list] (cmds h))))))
 
 (deftest apply-surfaces-an-nft-rejection
   (let [h   (harness {:table {nft-load {:exit 1 :stderr "Error: syntax error\n"}}})
@@ -250,24 +248,27 @@
     (is (some #{(d/nft-load-cmd (d/render-nft ["100.64.0.0/10" "10.96.0.0/12"]))} (cmds h)))
     (is (not (str/includes? (get @(:fs h) cidrs-file) "10.0.0.0/8")))))
 
-(deftest apply-tailscaled-exclusion-cases
-  (testing "listed with indentation: nothing to add"
-    (let [h (harness {:table {split-list {:stdout "Excluded PIDs:\n\t  4242\n"}}})]
-      (is (= {:status :listed :pid "4242"} (-> (app/apply! (:system h) {}) :ok :tailscaled)))
-      (is (not-any? #{split-add} (cmds h)))))
+(deftest apply-takes-tailscaled-out-of-the-split-tunnel
+  (testing "listed with indentation (an older version excluded it): removed"
+    (let [h         (harness {:table {split-list {:stdout "Excluded PIDs:\n\t  4242\n"}}})
+          [res err] (capture-err #(app/apply! (:system h) {}))]
+      (is (= {:status :rejoined :pid "4242"} (-> res :ok :tailscaled)))
+      (is (= [pid-show split-list split-del] (take-last 3 (cmds h))))
+      (is (str/includes? err "[+] tailscaled (pid 4242) rides Mullvad again (split-tunnel exclusion removed)"))))
   (testing "a longer PID that starts with ours does not count"
     (let [h (harness {:table {split-list {:stdout "    42421\n"}}})]
-      (is (= :excluded (-> (app/apply! (:system h) {}) :ok :tailscaled :status)))))
+      (is (= :not-listed (-> (app/apply! (:system h) {}) :ok :tailscaled :status)))
+      (is (not-any? #{split-del} (cmds h)))))
   (testing "tailscaled not running"
     (let [h (harness {:table {pid-show {:stdout "0\n"}}})]
       (is (= {:status :not-running} (-> (app/apply! (:system h) {}) :ok :tailscaled)))
       (is (not-any? #{split-list} (cmds h)))))
-  (testing "add fails: a warning, apply still ok"
-    (let [h         (harness {:table {split-add {:exit 1}}})
+  (testing "delete fails: a warning, apply still ok"
+    (let [h         (harness {:table {split-list {:stdout "    4242\n"} split-del {:exit 1}}})
           [res err] (capture-err #(app/apply! (:system h) {}))]
       (is (= {:status :failed :pid "4242"} (-> res :ok :tailscaled)))
-      (is (str/includes? err (str "[!] Could not exclude tailscaled (pid 4242) from Mullvad,"
-                                  " Tailscale login will fail")))))
+      (is (str/includes? err (str "[!] Could not remove tailscaled (pid 4242) from Mullvad's"
+                                  " split tunnel; run: mullvad split-tunnel delete 4242")))))
   (testing "no mullvad CLI"
     (let [h (harness {:shell-fn (missing #{"mullvad"})})]
       (is (= {:status :no-mullvad} (-> (app/apply! (:system h) {}) :ok :tailscaled)))
@@ -310,20 +311,19 @@
 (deftest install-full
   (let [h         (harness {:files {active-file "mullvad tailscale\n"}})
         [res err] (capture-err #(app/install! (:system h) {}))]
-    (is (= {:routes        {:web :enabled :dropin dropin-file :unit unit-file}
+    (is (= {:routes        {:web :enabled :dropin :absent :unit unit-file}
             :nm-dispatcher {:path      nm/dispatcher-path
                             :bytes     (count (nm/hook-text self-path))
                             :self-path self-path}}
            (:ok res)))
-    (is (= [sd-reload sd-reload unit-enable unit-restart nm-test nm-chmod] (cmds h)))
+    (is (= [sd-reload unit-enable unit-restart nm-test nm-chmod] (cmds h)))
     (is (= [[marker ""]
-            [dropin-file d/dropin-text]
             [unit-file (d/unit-text self-path)]
             [nm/dispatcher-path (nm/hook-text self-path)]]
            @(:writes h)))
     (is (= 120000 (:timeout-ms (:opts (first (filter #(= unit-restart (:cmd %))
                                                       (rec/calls (:shell h))))))))
-    (is (str/includes? err (str "[+] tailscaled drop-in installed: " dropin-file)))
+    (is (not-any? #{dropin-file} (map first @(:writes h))) "no drop-in re-excludes tailscaled")
     (is (str/includes? err (str "[+] Boot-persisted via " unit-file)))
     (is (str/includes? err "[+] Hook installed: /etc/NetworkManager/dispatcher.d/90-vpn-killswitch"))))
 
@@ -355,12 +355,13 @@
     (is (= [marker] @(:deletes h)))
     (is (= ["python3" helper "remove"] (first (cmds h))))))
 
-(deftest install-without-mullvad-skips-the-drop-in
-  (let [h   (harness {:shell-fn (missing #{"mullvad"})})
-        res (app/install! (:system h) {})]
-    (is (= :no-mullvad (-> res :ok :routes :dropin)))
-    (is (not-any? #{dropin-file} (map first @(:writes h))))
-    (is (= [sd-reload unit-enable unit-restart nm-test nm-chmod] (cmds h)))))
+(deftest install-retires-the-old-drop-in
+  (let [h         (harness {:files {dropin-file "dropin"}})
+        [res err] (capture-err #(app/install! (:system h) {}))]
+    (is (= :retired (-> res :ok :routes :dropin)))
+    (is (= [dropin-file] @(:deletes h)))
+    (is (= [dropin-rmdir sd-reload sd-reload unit-enable unit-restart nm-test nm-chmod] (cmds h)))
+    (is (str/includes? err (str "[+] Removed " dropin-file " (tailscaled now rides Mullvad)")))))
 
 (deftest install-stops-when-the-unit-cannot-start
   (let [h   (harness {:table {unit-restart {:exit 1 :stderr "Job failed"}}})

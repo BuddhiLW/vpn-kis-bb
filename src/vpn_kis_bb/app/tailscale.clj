@@ -4,12 +4,13 @@
    remove_tailscale_route_rules).
 
      apply!    load the nft bypass (nothing happens when it is current),
-               then retire the legacy `to X lookup 52` ip rules, exclude
-               tailscaled from Mullvad, and run the tailscale-web helper
-               when enabled and its nft table is missing. Safe to repeat
-               (boot unit, NM hook, by hand).
-     install!  tailscale-web marker, tailscaled drop-in, boot unit
-               (restarted, which runs apply), NetworkManager hook.
+               then retire the legacy `to X lookup 52` ip rules, take
+               tailscaled out of Mullvad's split tunnel (it rides the
+               tunnel), and run the tailscale-web helper when enabled and
+               its nft table is missing. Safe to repeat (boot unit, NM
+               hook, by hand).
+     install!  tailscale-web marker, retire the old tailscaled drop-in,
+               boot unit (restarted, which runs apply), NetworkManager hook.
      remove!   best-effort teardown of all of it except the NM hook.
 
    Tailnet traffic bypasses Mullvad by Mullvad's own marks, never by ip
@@ -138,10 +139,13 @@
       (log/info "Removed legacy Tailscale ip rules (replaced by the mark-based bypass)"))
     deleted))
 
-(defn- exclude-tailscaled!
-  "bash exclude_tailscaled_from_mullvad: add tailscaled's MainPID to
-   Mullvad's split tunnel unless it is listed. Never fails; returns
-   {:status :no-mullvad|:not-running|:listed|:excluded|:failed :pid ..}."
+(defn- rejoin-tailscaled!
+  "Take tailscaled's MainPID out of Mullvad's split tunnel when an older
+   version put it there. tailscaled rides the Mullvad tunnel (see
+   d/render-nft): excluded, its traffic would need the kill-switch
+   allowance and DNS outside the tunnel, and lose both on any provider or
+   network change. Never fails; returns
+   {:status :no-mullvad|:not-running|:not-listed|:rejoined|:failed :pid ..}."
   [system]
   (if-not (has? system "mullvad")
     {:status :no-mullvad}
@@ -150,16 +154,16 @@
         (nil? pid)
         {:status :not-running}
 
-        (d/pid-listed? (:stdout (sh! system d/split-list-cmd)) pid)
-        {:status :listed :pid pid}
+        (not (d/pid-listed? (:stdout (sh! system d/split-list-cmd)) pid))
+        {:status :not-listed :pid pid}
 
-        (ok-exit? (sh! system (d/split-add-cmd pid)))
-        (do (log/info "tailscaled (pid " pid ") excluded from Mullvad")
-            {:status :excluded :pid pid})
+        (ok-exit? (sh! system (d/split-delete-cmd pid)))
+        (do (log/info "tailscaled (pid " pid ") rides Mullvad again (split-tunnel exclusion removed)")
+            {:status :rejoined :pid pid})
 
         :else
-        (do (log/warn "Could not exclude tailscaled (pid " pid
-                      ") from Mullvad, Tailscale login will fail")
+        (do (log/warn "Could not remove tailscaled (pid " pid
+                      ") from Mullvad's split tunnel; run: mullvad split-tunnel delete " pid)
             {:status :failed :pid pid})))))
 
 (defn- web-if-enabled!
@@ -203,7 +207,7 @@
          nft
          (let [live?   (contains? #{:applied :current} (-> nft :ok :status))
                retired (if live? (retire-legacy-rules! system) 0)
-               ts      (exclude-tailscaled! system)
+               ts      (rejoin-tailscaled! system)
                web     (web-if-enabled! system)]
            (r/ok {:nft                  (:ok nft)
                   :legacy-rules-removed retired
@@ -228,20 +232,16 @@
 
     :else (r/ok :disabled)))
 
-(defn- install-dropin!
-  "bash install_tailscaled_dropin (only when mullvad is installed)."
+(declare remove-dropin!)
+
+(defn- retire-dropin!
+  "Remove the tailscaled drop-in older versions installed (it re-excluded
+   tailscaled from Mullvad on every start). :retired or :absent."
   [system]
-  (if-not (has? system "mullvad")
-    (r/ok :no-mullvad)
-    (let [w ((:write-fn system) d/dropin-path d/dropin-text)]
-      (if (r/err? w)
-        w
-        (let [dr (sd-port/-daemon-reload! (:systemd system))]
-          (if (r/err? dr)
-            (r/err :tailscale/daemon-reload-failed
-                   {:hint "systemctl daemon-reload failed" :cause dr})
-            (do (log/info "tailscaled drop-in installed: " d/dropin-path)
-                (r/ok d/dropin-path))))))))
+  (if (remove-dropin! system)
+    (do (log/info "Removed " d/dropin-path " (tailscaled now rides Mullvad)")
+        (r/ok :retired))
+    (r/ok :absent)))
 
 (defn- restart-unit!
   [system]
@@ -278,7 +278,7 @@
       (let [web (attempt #(sync-web-marker! system))]
         (if (r/err? web)
           web
-          (let [dropin (attempt #(install-dropin! system))]
+          (let [dropin (attempt #(retire-dropin! system))]
             (if (r/err? dropin)
               dropin
               (let [unit (attempt #(install-unit! system self))]
@@ -299,7 +299,7 @@
           :nm-dispatcher? bool  default true}
 
    Result<{:routes {:web :enabled|:removed|:disabled
-                    :dropin path|:no-mullvad
+                    :dropin :retired|:absent
                     :unit path}
                    | {:skipped :no-tailscale-interface}
            :nm-dispatcher <adapters.nm-dispatcher/install! value>
@@ -342,7 +342,8 @@
        (ok-exit? (sh! system d/nft-delete-cmd))))
 
 (defn- remove-dropin!
-  "bash remove_tailscaled_dropin. True when the drop-in existed."
+  "bash remove_tailscaled_dropin. True when the drop-in existed. A failed
+   daemon-reload is ignored: the drop-in only adds an ExecStartPost."
   [system]
   (if (nil? ((:read-fn system) d/dropin-path))
     false

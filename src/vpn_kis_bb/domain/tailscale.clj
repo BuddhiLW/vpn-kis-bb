@@ -3,7 +3,7 @@
    vpn-firewall-setup.sh): constants, commands as argv, parsers for
    `ip route show table 52`, `ip rule show`, `systemctl show` and
    `mullvad split-tunnel list` output, the choice of destination set, and
-   the text of the nft table, the boot unit and the tailscaled drop-in.
+   the text of the nft table and the boot unit.
 
    The nft table `inet vpn-killswitch-tailscale` gives packets bound for
    the set @tailnet (CGNAT 100.64.0.0/10 plus the RFC1918 routes tailscale
@@ -33,12 +33,21 @@
   "Conntrack mark Mullvad's firewall accepts."
   "0x00000f41")
 
+(def tailscaled-bypass-mark
+  "tailscaled's own sockets carry this fwmark (mask 0x00ff0000); tailscale's
+   ip rules send it to the main table, i.e. straight out the physical NIC."
+  "0x00080000")
+
 (def nft-table "vpn-killswitch-tailscale")
 
 (def nft-tag
   "Versioned comment on the route_out rule. Present in the live table with
    an unchanged stored set, it makes apply a no-op."
-  "vpn-kis tailnet bypasses Mullvad v2")
+  "vpn-kis tailnet bypasses Mullvad v3")
+
+(def rides-tag
+  "Comment on the route_out rule that clears tailscaled-bypass-mark."
+  "vpn-kis tailscaled rides Mullvad")
 
 (def protected-ips
   "Addresses that must stay inside the Mullvad tunnel: no set entry may
@@ -82,10 +91,10 @@
 (def dropin-rmdir-cmd ["rmdir" "--ignore-fail-on-non-empty" dropin-dir])
 (def unit-restart-cmd ["systemctl" "restart" unit-name])
 
-(defn split-add-cmd
-  "Adds `pid` to Mullvad's split tunnel."
+(defn split-delete-cmd
+  "Removes `pid` from Mullvad's split tunnel."
   [pid]
-  ["mullvad" "split-tunnel" "add" (str pid)])
+  ["mullvad" "split-tunnel" "delete" (str pid)])
 
 (defn rule-del-cmd
   "Deletes one legacy `to <cidr> lookup 52` ip rule."
@@ -282,7 +291,14 @@
 (defn render-nft
   "The nft batch loaded by apply (bash render_tailscale_nft): create the
    table if missing, delete it, define it whole. One transaction, so the
-   rules are never absent."
+   rules are never absent.
+
+   route_out also clears tailscaled-bypass-mark on tailscaled's own
+   packets to non-tailnet destinations (control plane, DERP, WireGuard
+   UDP). Unmarked, they miss tailscale's `fwmark 0x80000 lookup main`
+   rules and take Mullvad's catch-all, whatever the ip rule order. So
+   tailscaled always rides the Mullvad tunnel and needs no split-tunnel
+   exclusion, no kill-switch allowance and no DNS outside the tunnel."
   [dests]
   (let [elems (str/join ", " dests)
         marks (str "meta mark set " mullvad-fwmark " ct mark set " mullvad-ct-mark)]
@@ -298,6 +314,8 @@
          "    chain route_out {\n"
          "        type route hook output priority mangle; policy accept;\n"
          "        ip daddr @tailnet " marks " comment \"" nft-tag "\"\n"
+         "        meta mark and 0x00ff0000 == " tailscaled-bypass-mark
+         " ip daddr != @tailnet meta mark set 0x00000000 comment \"" rides-tag "\"\n"
          "    }\n"
          "    chain mark_forwarded {\n"
          "        type filter hook prerouting priority mangle; policy accept;\n"
@@ -325,15 +343,3 @@
        "\n"
        "[Install]\n"
        "WantedBy=multi-user.target\n"))
-
-(def dropin-text
-  "tailscaled drop-in adding the new MainPID to Mullvad's split tunnel on
-   every start."
-  (str "# Managed by vpn-kis: re-exclude tailscaled from Mullvad on\n"
-       "# every start (Mullvad split-tunnel is PID-based). '-' keeps tailscaled up\n"
-       "# if mullvad-daemon is absent or not ready yet.\n"
-       "[Unit]\n"
-       "After=mullvad-daemon.service\n"
-       "\n"
-       "[Service]\n"
-       "ExecStartPost=-/usr/bin/mullvad split-tunnel add $MAINPID\n"))

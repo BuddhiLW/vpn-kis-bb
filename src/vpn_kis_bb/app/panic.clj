@@ -9,8 +9,7 @@
    IPv6 disabled) are recorded but not reported.
 
    The tailnet bypass (nft table inet vpn-killswitch-tailscale,
-   /etc/vpn-killswitch/tailnet.cidrs, its boot unit and the tailscaled
-   drop-in) is KEPT, so the tailnet and the k8s cluster behind it stay
+   /etc/vpn-killswitch/tailnet.cidrs and its boot unit) is KEPT, so the tailnet and the k8s cluster behind it stay
    reachable; `<prog> tailscale-routes remove` drops it.
 
    System keys: :shell :systemd :read-fn :write-fn :delete-fn :settings
@@ -102,7 +101,7 @@
    "  - /etc/default/grub  (ipv6.disable=1 kernel arg)"
    "  - UFW rule files in /etc/ufw/  (UFW disabled but rules remain)"
    "  - Tailscale bypass past Mullvad (nft table inet vpn-killswitch-tailscale,"
-   "    boot unit, tailscaled drop-in) so the tailnet stays reachable."
+   "    boot unit) so the tailnet stays reachable."
    (str "    Remove with: sudo " prog " tailscale-routes remove")
    ""
    "To fully revert IPv6 disable:"

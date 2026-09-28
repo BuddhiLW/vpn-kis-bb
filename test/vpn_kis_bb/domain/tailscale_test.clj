@@ -20,7 +20,8 @@
         "    }"
         "    chain route_out {"
         "        type route hook output priority mangle; policy accept;"
-        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v2\""
+        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "        meta mark and 0x00ff0000 == 0x00080000 ip daddr != @tailnet meta mark set 0x00000000 comment \"vpn-kis tailscaled rides Mullvad\""
         "    }"
         "    chain mark_forwarded {"
         "        type filter hook prerouting priority mangle; policy accept;"
@@ -67,16 +68,16 @@
                "WantedBy=multi-user.target")
          (d/unit-text "/opt/vpn-kis/bin/vpn-kis"))))
 
-(deftest dropin-text-golden
-  (is (= (text "# Managed by vpn-kis: re-exclude tailscaled from Mullvad on"
-               "# every start (Mullvad split-tunnel is PID-based). '-' keeps tailscaled up"
-               "# if mullvad-daemon is absent or not ready yet."
-               "[Unit]"
-               "After=mullvad-daemon.service"
-               ""
-               "[Service]"
-               "ExecStartPost=-/usr/bin/mullvad split-tunnel add $MAINPID")
-         d/dropin-text)))
+(deftest render-nft-routes-tailscaled-into-mullvad
+  (testing "tailscaled's own packets lose tailscale's bypass mark, tailnet ones keep Mullvad's"
+    (let [lines (rx/split-lines* (d/render-nft [d/cgnat]))
+          rides (filter #(str/includes? % d/rides-tag) lines)]
+      (is (= 1 (count rides)))
+      (is (str/includes? (first rides) "meta mark and 0x00ff0000 == 0x00080000"))
+      (is (str/includes? (first rides) "ip daddr != @tailnet"))
+      (is (str/includes? (first rides) "meta mark set 0x00000000"))
+      (is (not (str/includes? (first rides) d/mullvad-fwmark))
+          "never Mullvad's mark: that would send tailscaled around the tunnel"))))
 
 ;; ---------------------------------------------------------------- addresses
 
@@ -192,7 +193,7 @@
 (def live-table
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v2\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
         "\t}"
         "}"))
 
@@ -203,7 +204,7 @@
     (is (not (d/bypass-current? live-table "100.64.0.0/10\n" dests)))
     (is (not (d/bypass-current? live-table nil dests)))
     (is (not (d/bypass-current? "" (d/cidrs-text dests) dests)))
-    (is (not (d/bypass-current? (str/replace live-table "v2" "v1") (d/cidrs-text dests) dests)))))
+    (is (not (d/bypass-current? (str/replace live-table "v3" "v2") (d/cidrs-text dests) dests)))))
 
 (deftest cidrs-file-round-trip
   (is (= "100.64.0.0/10\n10.96.0.0/12\n" (d/cidrs-text ["100.64.0.0/10" "10.96.0.0/12"])))
@@ -267,5 +268,5 @@
   (is (nil? (d/web-helper-path nil nil))))
 
 (deftest texts-carry-no-em-dash
-  (doseq [s [(d/render-nft [d/cgnat]) (d/unit-text "/x") d/dropin-text]]
+  (doseq [s [(d/render-nft [d/cgnat]) (d/unit-text "/x")]]
     (is (not (str/includes? s "—")))))
