@@ -33,12 +33,22 @@
   "Conntrack mark Mullvad's firewall accepts."
   "0x00000f41")
 
+(def clobbered-ct-mark
+  "What tailscaled's iptables mangle OUTPUT rule turns mullvad-ct-mark into
+   on a new flow: it copies (mark & 0xff0000) into the connmark, and
+   mullvad-fwmark has 0x6f there. Every rule keyed on mullvad-ct-mark (our
+   masquerade, Mullvad's accept and masquerade for excluded apps) then
+   misses. Which chain runs last at priority mangle depends on registration
+   order, so a tailscaled restart can flip it."
+  "0x006f0000")
+
 (def nft-table "vpn-killswitch-tailscale")
 
 (def nft-tag
   "Versioned comment on the route_out rule. Present in the live table with
-   an unchanged stored set, it makes apply a no-op."
-  "vpn-kis tailnet bypasses Mullvad v2")
+   an unchanged stored set, it makes apply a no-op. v3 adds restore_ctmark,
+   so a v2 table is replaced on the next apply."
+  "vpn-kis tailnet bypasses Mullvad v3")
 
 (def protected-ips
   "Addresses that must stay inside the Mullvad tunnel: no set entry may
@@ -282,7 +292,8 @@
 (defn render-nft
   "The nft batch loaded by apply (bash render_tailscale_nft): create the
    table if missing, delete it, define it whole. One transaction, so the
-   rules are never absent."
+   rules are never absent. restore_ctmark runs after every priority-mangle
+   output chain and undoes tailscaled's connmark clobber (clobbered-ct-mark)."
   [dests]
   (let [elems (str/join ", " dests)
         marks (str "meta mark set " mullvad-fwmark " ct mark set " mullvad-ct-mark)]
@@ -302,6 +313,11 @@
          "    chain mark_forwarded {\n"
          "        type filter hook prerouting priority mangle; policy accept;\n"
          "        iifname != \"tailscale0\" ip daddr @tailnet " marks "\n"
+         "    }\n"
+         "    chain restore_ctmark {\n"
+         "        type filter hook output priority mangle + 10; policy accept;\n"
+         "        ct state new meta mark " mullvad-fwmark " ct mark " clobbered-ct-mark
+         " ct mark set " mullvad-ct-mark "\n"
          "    }\n"
          "    chain snat_tailnet {\n"
          "        type nat hook postrouting priority srcnat; policy accept;\n"
