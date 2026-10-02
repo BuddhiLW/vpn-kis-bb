@@ -20,12 +20,16 @@
         "    }"
         "    chain route_out {"
         "        type route hook output priority mangle; policy accept;"
-        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "        meta mark and 0x00ff0000 == 0x00080000 ip daddr != @tailnet meta mark set 0x00000000 comment \"vpn-kis tailscaled rides Mullvad\""
         "    }"
         "    chain mark_forwarded {"
         "        type filter hook prerouting priority mangle; policy accept;"
         "        iifname != \"tailscale0\" ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41"
+        "    }"
+        "    chain restore_ctmark {"
+        "        type filter hook output priority mangle + 10; policy accept;"
+        "        ct state new meta mark 0x6d6f6c65 ct mark 0x006f0000 ct mark set 0x00000f41"
         "    }"
         "    chain snat_tailnet {"
         "        type nat hook postrouting priority srcnat; policy accept;"
@@ -193,7 +197,7 @@
 (def live-table
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "\t}"
         "}"))
 
@@ -204,7 +208,7 @@
     (is (not (d/bypass-current? live-table "100.64.0.0/10\n" dests)))
     (is (not (d/bypass-current? live-table nil dests)))
     (is (not (d/bypass-current? "" (d/cidrs-text dests) dests)))
-    (is (not (d/bypass-current? (str/replace live-table "v3" "v2") (d/cidrs-text dests) dests)))))
+    (is (not (d/bypass-current? (str/replace live-table "v4" "v3") (d/cidrs-text dests) dests)))))
 
 (deftest cidrs-file-round-trip
   (is (= "100.64.0.0/10\n10.96.0.0/12\n" (d/cidrs-text ["100.64.0.0/10" "10.96.0.0/12"])))

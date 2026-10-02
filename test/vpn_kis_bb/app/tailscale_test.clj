@@ -62,7 +62,7 @@
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
         "\t\ttype route hook output priority mangle; policy accept;"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "\t}"
         "}"))
 
@@ -189,7 +189,7 @@
 
 (deftest apply-reloads-an-older-table-version
   (let [h (harness {:files {cidrs-file (d/cidrs-text dests)}
-                    :table {nft-list {:stdout (str/replace live-table "v3" "v2")}}})]
+                    :table {nft-list {:stdout (str/replace live-table "v4" "v3")}}})]
     (is (= :applied (-> (app/apply! (:system h) {}) :ok :nft :status)))))
 
 (deftest apply-retires-legacy-rules-after-the-marks
