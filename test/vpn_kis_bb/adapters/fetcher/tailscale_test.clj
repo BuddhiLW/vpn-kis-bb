@@ -39,3 +39,14 @@
 (deftest bootstrap-ips-load
   (is (set? (ts/load-bootstrap-ips)))
   (is (pos? (count (ts/load-bootstrap-ips)))))
+
+(deftest control-range-is-whitelisted-whole
+  (is (= 254 (count ts/control-range-ips)))
+  (is (contains? ts/control-range-ips "192.200.0.1"))
+  (is (contains? ts/control-range-ips "192.200.0.254"))
+  (is (not (contains? ts/control-range-ips "192.200.0.0")))
+  (is (not (contains? ts/control-range-ips "192.200.0.255")))
+  (testing "even when DNS and the derpmap answer nothing"
+    (let [r (port/-fetch-ips (ts/make (fx/web {}) (fx/rsv {})) {})]
+      (is (contains? (-> r :ok :ips) "192.200.0.101"))
+      (is (contains? (-> r :ok :ips) "192.200.0.113")))))

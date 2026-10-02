@@ -62,7 +62,7 @@
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
         "\t\ttype route hook output priority mangle; policy accept;"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "\t}"
         "}"))
 
@@ -146,9 +146,10 @@
     (is (= {:nft                  {:status :applied :dests dests :dropped [] :source :table}
             :legacy-rules-removed 0
             :tailscaled           {:status :excluded :pid "4242"}
+            :netmap               :skipped
             :web                  {:status :disabled}}
            (:ok res)))
-    (is (= [t52 nft-list nft-load rule-show pid-show split-list split-add] (cmds h)))
+    (is (= [t52 nft-list nft-load rule-show pid-show split-list split-add t52] (cmds h)))
     (is (= [[cidrs-file (text "100.64.0.0/10" "10.244.0.0/16" "10.96.0.0/12" "192.168.100.0/24")]]
            @(:writes h)))
     (testing "progress lines, as the bash prints them"
@@ -164,8 +165,35 @@
         res (app/apply! (:system h) {})]
     (is (= :current (-> res :ok :nft :status)))
     (is (= {:status :listed :pid "4242"} (-> res :ok :tailscaled)))
-    (is (= [t52 nft-list rule-show pid-show split-list] (cmds h)))
+    (is (= [t52 nft-list rule-show pid-show split-list t52] (cmds h)))
     (is (= [] @(:writes h)))))
+
+(def quad100-only (text "100.100.100.100 dev tailscale0 "))
+
+(deftest apply-waits-for-the-netmap-and-loads-the-set-again
+  (testing "tailscaled up without a netmap: first load, wait, second load with the routes"
+    (let [h   (harness {:table {t52 (fn [n] {:stdout (if (<= n 3) quad100-only table52-out)})}})
+          res (app/apply! (:system h) {})]
+      (is (= :loaded (-> res :ok :netmap)))
+      (is (= {:status :applied :dests dests :dropped [] :source :table} (-> res :ok :nft)))
+      (is (= [(d/nft-load-cmd (d/render-nft ["100.64.0.0/10"])) nft-load]
+             (filterv #(= "sh" (first %)) (cmds h))))
+      (is (= 2 (count (filter #{app/sleep-cmd} (cmds h)))))
+      (is (= (d/cidrs-text dests) (get @(:fs h) cidrs-file)))))
+  (testing "a set learned earlier survives an apply that ran before the login"
+    (let [h   (harness {:files {cidrs-file (d/cidrs-text dests)}
+                        :table {t52 {:stdout quad100-only}}})
+          res (app/apply! (:system h) {:netmap-wait-s 2})]
+      (is (= :timeout (-> res :ok :netmap)))
+      (is (= {:status :applied :dests dests :dropped [] :source :stored} (-> res :ok :nft)))
+      (is (= 2 (count (filter #{app/sleep-cmd} (cmds h)))))))
+  (testing "no wait when tailscaled is not running or the wait is disabled"
+    (let [h (harness {:table {t52 {:stdout quad100-only} pid-show {:stdout "0\n"}}})]
+      (is (= :skipped (-> (app/apply! (:system h) {}) :ok :netmap)))
+      (is (not-any? #{app/sleep-cmd} (cmds h))))
+    (let [h (harness {:table {t52 {:stdout quad100-only}}})]
+      (is (= :skipped (-> (app/apply! (:system h) {:netmap-wait-s 0}) :ok :netmap)))
+      (is (not-any? #{app/sleep-cmd} (cmds h))))))
 
 (deftest apply-keeps-the-stored-set-while-tailscaled-restarts
   (let [stored (text "100.64.0.0/10" "10.96.0.0/12")]
@@ -191,7 +219,7 @@
 
 (deftest apply-reloads-an-older-table-version
   (let [h (harness {:files {cidrs-file (d/cidrs-text dests)}
-                    :table {nft-list {:stdout (str/replace live-table "v3" "v2")}}})]
+                    :table {nft-list {:stdout (str/replace live-table "v4" "v3")}}})]
     (is (= :applied (-> (app/apply! (:system h) {}) :ok :nft :status)))))
 
 (deftest apply-retires-legacy-rules-after-the-marks

@@ -20,7 +20,7 @@
         "    }"
         "    chain route_out {"
         "        type route hook output priority mangle; policy accept;"
-        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "        ip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "    }"
         "    chain mark_forwarded {"
         "        type filter hook prerouting priority mangle; policy accept;"
@@ -28,7 +28,7 @@
         "    }"
         "    chain restore_ctmark {"
         "        type filter hook output priority mangle + 10; policy accept;"
-        "        ct state new meta mark 0x6d6f6c65 ct mark 0x006f0000 ct mark set 0x00000f41"
+        "        ct state new meta mark 0x6d6f6c65 ct mark & 0x00ff0000 == 0x006f0000 ct mark set 0x00000f41"
         "    }"
         "    chain snat_tailnet {"
         "        type nat hook postrouting priority srcnat; policy accept;"
@@ -134,6 +134,24 @@
           :source  :table}
          (d/destinations table52 "100.64.0.0/10\n"))))
 
+(deftest netmap-loaded-needs-more-than-quad100
+  (is (d/netmap-loaded? table52))
+  (is (d/netmap-loaded? "100.100.100.100 dev tailscale0 \n100.73.27.116 dev tailscale0 \n"))
+  (is (not (d/netmap-loaded? "100.100.100.100 dev tailscale0 \n")))
+  (is (not (d/netmap-loaded? "throw 127.0.0.0/8 \n192.168.7.0/24 dev eth0 \n")))
+  (is (not (d/netmap-loaded? "")))
+  (is (not (d/netmap-loaded? nil))))
+
+(deftest destinations-keep-the-stored-set-until-a-netmap-arrives
+  (let [stored "100.64.0.0/10\n192.168.100.137\n"]
+    (testing "tailscaled up, logged out: only quad100 in table 52"
+      (is (= {:dests ["100.64.0.0/10" "192.168.100.137"] :dropped [] :source :stored}
+             (d/destinations "100.100.100.100 dev tailscale0 \n" stored))))
+    (testing "logged in with peers but no subnet routes: the table wins and the set shrinks"
+      (is (= {:dests ["100.64.0.0/10"] :dropped [] :source :table}
+             (d/destinations "100.100.100.100 dev tailscale0 \n100.73.27.116 dev tailscale0 \n"
+                             stored))))))
+
 (deftest destinations-keep-the-stored-set-while-tailscaled-restarts
   (let [stored (text "100.64.0.0/10" "10.96.0.0/12")]
     (testing "table 52 missing or empty: the stored set wins"
@@ -196,7 +214,7 @@
 (def live-table
   (text "table inet vpn-killswitch-tailscale {"
         "\tchain route_out {"
-        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v3\""
+        "\t\tip daddr @tailnet meta mark set 0x6d6f6c65 ct mark set 0x00000f41 comment \"vpn-kis tailnet bypasses Mullvad v4\""
         "\t}"
         "}"))
 
@@ -207,7 +225,7 @@
     (is (not (d/bypass-current? live-table "100.64.0.0/10\n" dests)))
     (is (not (d/bypass-current? live-table nil dests)))
     (is (not (d/bypass-current? "" (d/cidrs-text dests) dests)))
-    (is (not (d/bypass-current? (str/replace live-table "v3" "v2") (d/cidrs-text dests) dests)))))
+    (is (not (d/bypass-current? (str/replace live-table "v4" "v3") (d/cidrs-text dests) dests)))))
 
 (deftest cidrs-file-round-trip
   (is (= "100.64.0.0/10\n10.96.0.0/12\n" (d/cidrs-text ["100.64.0.0/10" "10.96.0.0/12"])))
