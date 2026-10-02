@@ -33,22 +33,30 @@
   "Conntrack mark Mullvad's firewall accepts."
   "0x00000f41")
 
+(def clobber-mask
+  "The connmark bits tailscaled's iptables mangle OUTPUT rule owns
+   (CONNMARK --save-mark --nfmask 0xff0000 --ctmask 0xff0000)."
+  "0x00ff0000")
+
 (def clobbered-ct-mark
-  "What tailscaled's iptables mangle OUTPUT rule turns mullvad-ct-mark into
-   on a new flow: it copies (mark & 0xff0000) into the connmark, and
-   mullvad-fwmark has 0x6f there. Every rule keyed on mullvad-ct-mark (our
-   masquerade, Mullvad's accept and masquerade for excluded apps) then
-   misses. Which chain runs last at priority mangle depends on registration
-   order, so a tailscaled restart can flip it."
+  "What those bits read after tailscaled's rule ran on a new flow carrying
+   mullvad-fwmark (0x6f in that byte). Only the masked byte is replaced, so
+   the whole connmark is 0x006f0f41 when mullvad-ct-mark was set first and
+   0x006f0000 when it was not; match under clobber-mask to catch both. Every
+   rule keyed on mullvad-ct-mark (our masquerade, Mullvad's accept and
+   masquerade for excluded apps) misses either value. Which chain runs last
+   at priority mangle depends on registration order, so a tailscaled restart
+   or a ufw reload can flip it."
   "0x006f0000")
 
 (def nft-table "vpn-killswitch-tailscale")
 
 (def nft-tag
   "Versioned comment on the route_out rule. Present in the live table with
-   an unchanged stored set, it makes apply a no-op. v3 adds restore_ctmark,
-   so a v2 table is replaced on the next apply."
-  "vpn-kis tailnet bypasses Mullvad v3")
+   an unchanged stored set, it makes apply a no-op. v3 added restore_ctmark,
+   v4 matches the clobber under clobber-mask, so an older table is replaced
+   on the next apply."
+  "vpn-kis tailnet bypasses Mullvad v4")
 
 (def protected-ips
   "Addresses that must stay inside the Mullvad tunnel: no set entry may
@@ -316,7 +324,7 @@
          "    }\n"
          "    chain restore_ctmark {\n"
          "        type filter hook output priority mangle + 10; policy accept;\n"
-         "        ct state new meta mark " mullvad-fwmark " ct mark " clobbered-ct-mark
+         "        ct state new meta mark " mullvad-fwmark " ct mark & " clobber-mask " == " clobbered-ct-mark
          " ct mark set " mullvad-ct-mark "\n"
          "    }\n"
          "    chain snat_tailnet {\n"
