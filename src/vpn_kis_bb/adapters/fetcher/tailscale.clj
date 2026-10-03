@@ -16,6 +16,14 @@
 (def control-hosts
   ["login.tailscale.com" "controlplane.tailscale.com" "log.tailscale.io"])
 
+(def control-range-ips
+  "Every host of 192.200.0.0/24, the range Tailscale documents for its
+   coordination server (login, controlplane, log). DNS hands out a rotating
+   subset of it, so resolving control-hosts at fetch time leaves holes that
+   tailscaled later dials into; the endpoint ipset holds single addresses,
+   hence the expansion."
+  (into #{} (map #(str "192.200.0." %)) (range 1 255)))
+
 (def bootstrap-ips
   "Bootstrap-DNS servers compiled into tailscaled (tailscale
    net/dnsfallback/dns-fallback-servers.json, mirrored from the bash
@@ -75,13 +83,13 @@
                  (try
                    (parse-derpmap-json
                     (json/parse-string (-> resp :ok :body) keyword))
-                   (catch Throwable _ nil)))
+                   (catch Throwable _unparseable-derpmap-falls-back-to-static-ips nil)))
           derp-ips      (or (:ips derp) #{})
           derp-hosts    (or (:hostnames derp) [])
           ctrl-ips      (resolve-hostnames resolver control-hosts)
           derp-host-ips (resolve-hostnames resolver derp-hosts)]
       (r/ok {:provider   :tailscale
-             :ips        (u/merge-ip-sets bootstrap derp-ips
+             :ips        (u/merge-ip-sets bootstrap control-range-ips derp-ips
                                           ctrl-ips derp-host-ips)
              :source     derpmap-url
              :fetched-at (u/now-iso)}))))

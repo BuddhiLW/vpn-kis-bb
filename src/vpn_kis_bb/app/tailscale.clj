@@ -56,6 +56,15 @@
          {:cmd cmd :exit exit :stdout (or stdout "") :stderr (or stderr "")})
        {:cmd cmd :exit -1 :stdout "" :stderr (str (or (:message res) (:error res)))}))))
 
+(def netmap-wait-s
+  "How long apply waits, one probe a second, for tailscaled to get its
+   netmap when it is running without one. The first nft load is what sends
+   tailscaled's own traffic through the Mullvad tunnel (rides-tag), so it
+   only logs in, and the subnet routes only show up in table 52, after it."
+  30)
+
+(def sleep-cmd ["sleep" "1"])
+
 (defn- ok-exit? [x] (= 0 (:exit x)))
 
 (defn- has?
@@ -166,6 +175,23 @@
                       ") from Mullvad's split tunnel; run: mullvad split-tunnel delete " pid)
             {:status :failed :pid pid})))))
 
+(defn- await-netmap!
+  "When tailscaled runs but table 52 has no netmap yet, probe once a second
+   for up to `seconds`. Returns :loaded (it arrived while waiting),
+   :timeout, or :skipped (nothing to wait for)."
+  [system ts seconds]
+  (let [loaded? #(d/netmap-loaded? (:stdout (sh! system d/table-routes-cmd)))]
+    (if (or (nil? (:pid ts)) (not (pos? seconds)) (loaded?))
+      :skipped
+      (do (log/info "Waiting up to " seconds "s for tailscaled to log in...")
+          (loop [left seconds]
+            (cond
+              (not (pos? left)) (do (log/warn "tailscaled has no netmap yet; rerun"
+                                              " tailscale-routes apply once it is logged in")
+                                    :timeout)
+              (do (sh! system sleep-cmd) (loaded?)) :loaded
+              :else (recur (dec left))))))))
+
 (defn- web-if-enabled!
   "Run the tailscale-web helper when its marker exists and its nft table
    is missing. Never fails; returns {:status :disabled|:present|:applied|:failed}."
@@ -190,16 +216,20 @@
   "Bring the tailnet bypass up to date (bash apply_tailscale_route_rules).
    Changes nothing when the live table carries the current tag and set.
    Legacy `to X lookup 52` rules are removed only once the marks are live
-   (applied or current). opts: currently unused.
+   (applied or current). When tailscaled is running without a netmap, waits
+   for it (opts :netmap-wait-s, default netmap-wait-s, 0 to skip) and loads
+   the set again with the routes that arrived; :nft is then that second
+   load and :netmap says how the wait ended.
 
    Result<{:nft {:status :applied|:current|:no-nft :dests [..] :dropped [..]
                  :source :table|:stored}
            :legacy-rules-removed n
            :tailscaled {:status .. :pid ..}
+           :netmap :skipped|:loaded|:timeout
            :web {:status ..}}>;
    err :tailscale/nft-failed or :tailscale/cidrs-write-failed (the rest is
    then skipped)."
-  [system _opts]
+  [system opts]
   (attempt
    (fn []
      (let [nft (apply-nft! system)]
@@ -208,11 +238,17 @@
          (let [live?   (contains? #{:applied :current} (-> nft :ok :status))
                retired (if live? (retire-legacy-rules! system) 0)
                ts      (rejoin-tailscaled! system)
-               web     (web-if-enabled! system)]
-           (r/ok {:nft                  (:ok nft)
-                  :legacy-rules-removed retired
-                  :tailscaled           ts
-                  :web                  web})))))))
+               netmap  (if live?
+                         (await-netmap! system ts (or (:netmap-wait-s opts) netmap-wait-s))
+                         :skipped)
+               nft     (if (= :loaded netmap) (apply-nft! system) nft)]
+           (if (r/err? nft)
+             nft
+             (r/ok {:nft                  (:ok nft)
+                    :legacy-rules-removed retired
+                    :tailscaled           ts
+                    :netmap               netmap
+                    :web                  (web-if-enabled! system)}))))))))
 
 ;; ---------------------------------------------------------------- install
 
