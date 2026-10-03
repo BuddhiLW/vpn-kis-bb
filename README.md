@@ -21,7 +21,7 @@ sudo bin/vpn-kis providers mullvad tailscale             # strict lock
 sudo bin/vpn-kis panic                   # emergency: open everything, keep the tailnet
 ```
 
-`bin/vpn-kis` picks the runtime: `$VPN_KIS_BIN`, then the `cljw` interpreter (the default; it starts in about 0.1 s), then `bb`. `bin/build-native` produces `build/vpn-kis` with `cljw build`, used only with `VPN_KIS_NATIVE=1`: cljw 1.14.11's build still miscompiles parts of setup and refresh. It also looks for them in `/usr/local/bin` and the linuxbrew prefix, since sudo and NetworkManager hooks run with a minimal PATH. It exports `VPN_KIS_SELF` (its absolute path: what systemd units and the NetworkManager hook invoke) and `VPN_KIS_PROG` (the name shown in help), and runs the command that `exclude run` or `split connect` asks for in its own process, through the file named by `VPN_KIS_EXEC_FILE`.
+`bin/vpn-kis` picks the runtime: `$VPN_KIS_BIN`, then the `cljw` interpreter (the default; it starts in about 0.1 s), then `bb`. `bin/build-native` builds a binary and runs `bin/dry-run-check` against it before installing it at `build/vpn-kis`; cljw 1.14.11 currently fails these checks, so use the default interpreter. A direct `cljw build -o build/vpn-kis` also needs `mkdir -p build` first. The launcher looks for runtimes in `/usr/local/bin` and the linuxbrew prefix, since sudo and NetworkManager hooks run with a minimal PATH. It exports `VPN_KIS_SELF` (its absolute path: what systemd units and the NetworkManager hook invoke) and `VPN_KIS_PROG` (the name shown in help), and runs the command that `exclude run` or `split connect` asks for in its own process, through the file named by `VPN_KIS_EXEC_FILE`.
 
 ## Commands
 

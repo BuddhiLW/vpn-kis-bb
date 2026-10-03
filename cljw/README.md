@@ -8,11 +8,14 @@ names and the same semantics, on top of what cljw ships
 This directory is **mounted ahead of `src/` on the cljw classpath only**:
 
     cljw -cp cljw:src -m vpn-kis-bb.cli.main ...
-    cljw build -m vpn-kis-bb.cli.main -cp cljw:src -o build/vpn-kis   # bin/build-native
+    mkdir -p build
+    cljw build -m vpn-kis-bb.cli.main -cp cljw:src -o build/vpn-kis
 
-Run both from a directory without a `deps.edn` (the scripts `cd /`): cljw
-reads the working directory's `deps.edn`, and vpn-kis-bb's lists the
-Babashka dependencies.
+The commands above run from the repository root. A direct build needs the
+output directory created first. Prefer `bin/build-native` for a smoke test;
+the launcher runs the interpreter from `/` with an absolute classpath.
+cljw reads the working directory's `deps.edn`, and vpn-kis-bb's lists the
+Babashka dependencies, so direct commands print a skipped-dependencies note.
 
 Under Babashka the real libraries from `bb.edn` are used and this
 directory is never on the classpath, so the application code in `src/`
